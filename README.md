@@ -1,8 +1,8 @@
 # diffguard
 
-A diff-scoped code quality gate for Go repositories. Analyzes only changed code in a git diff and reports on complexity, size, dependency structure, churn risk, and mutation test coverage.
+A targeted code quality gate for Go repositories. Analyzes either the changed regions of a git diff (CI mode) or specified files/directories (refactoring mode), and reports on complexity, size, dependency structure, churn risk, and mutation test coverage.
 
-Designed as a CI gate for AI-generated PRs, where line-by-line human review doesn't scale.
+Designed as a CI gate for AI-generated PRs — where line-by-line human review doesn't scale — with a refactoring mode for iterating on an existing file's quality locally.
 
 ## Install
 
