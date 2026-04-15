@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # diffguard needs history for diff mode + churn
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Vet
+        run: go vet ./...
+
+  diffguard:
+    # Dogfooding: run diffguard's own quality gate against this repo.
+    # Mutation testing is skipped here because it's slow; the `mutation`
+    # workflow runs it weekly.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Build diffguard
+        run: go build -o diffguard ./cmd/diffguard/
+
+      - name: Run diffguard (PR — diff mode)
+        if: github.event_name == 'pull_request'
+        run: ./diffguard --skip-mutation --base origin/${{ github.base_ref }} .
+
+      - name: Run diffguard (push — refactoring mode)
+        if: github.event_name == 'push'
+        run: ./diffguard --skip-mutation --paths internal/,cmd/ .

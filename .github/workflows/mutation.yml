@@ -1,0 +1,47 @@
+name: mutation
+
+# Mutation testing is slow (~2–3 minutes on this repo; worse on larger
+# codebases). We run it weekly and on manual dispatch rather than per-PR.
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      paths:
+        description: 'Comma-separated paths to mutate (refactoring mode)'
+        default: 'internal/,cmd/'
+        required: false
+      tier1-threshold:
+        description: 'Tier-1 FAIL threshold (kill %)'
+        default: '90'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Build diffguard
+        run: go build -o diffguard ./cmd/diffguard/
+
+      - name: Run full quality gate (with mutation)
+        run: |
+          ./diffguard \
+            --paths "${PATHS:-internal/,cmd/}" \
+            --tier1-threshold "${TIER1:-90}" \
+            --output json .
+        env:
+          PATHS: ${{ github.event.inputs.paths }}
+          TIER1: ${{ github.event.inputs.tier1-threshold }}
