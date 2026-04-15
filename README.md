@@ -31,8 +31,11 @@ diffguard --base main /path/to/repo
 diffguard --paths internal/foo/bar.go /path/to/repo
 diffguard --paths internal/foo/,internal/bar/ /path/to/repo
 
-# Skip mutation testing (faster)
+# Skip mutation testing (fastest)
 diffguard --skip-mutation /path/to/repo
+
+# Or sample a subset of mutants for faster-but-still-useful signal
+diffguard --mutation-sample-rate 20 /path/to/repo
 
 # JSON output for CI ingestion
 diffguard --output json /path/to/repo
@@ -99,7 +102,7 @@ Applies mutations to changed code and runs tests to verify they catch the change
 | Branch removal | Empty the body of an `if` |
 | Statement deletion | Remove a bare function-call statement |
 
-Reports a mutation score (killed / total). Mutants in different packages are tested in parallel (up to `runtime.NumCPU()` concurrent package runs). Use `--skip-mutation` to skip this, or `--mutation-sample-rate 50` to test a random 50% subset.
+Reports a mutation score (killed / total). Mutants run fully in parallel — including mutants on the same file — using `go test -overlay` so each worker sees its own mutated copy without touching the real source tree. Concurrency defaults to `runtime.NumCPU()` and is tunable with `--mutation-workers`. Use `--skip-mutation` to skip entirely, or `--mutation-sample-rate 20` for a faster-but-noisier subset.
 
 #### Tiered mutation scoring
 
@@ -171,7 +174,14 @@ The `--fail-on` flag controls sensitivity:
 
 ## CI Integration
 
+The recommended pattern is a two-tier setup:
+
+1. **Per-PR gate** — diff mode with a sampled mutation run (~20%) for fast feedback on changed code.
+2. **Scheduled full sweep** — refactoring mode with 100% mutation across the whole codebase, once a week or on-demand.
+
 ### GitHub Actions
+
+**Per-PR gate (diff mode, sampled mutation):**
 
 ```yaml
 name: diffguard
@@ -183,17 +193,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # needed for git diff
+          fetch-depth: 0  # needed for git diff and churn history
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.26.1'
 
       - name: Install diffguard
         run: go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
 
       - name: Run diffguard
-        run: diffguard --skip-mutation --base origin/${{ github.base_ref }} .
+        run: diffguard --mutation-sample-rate 20 --base origin/${{ github.base_ref }} .
+```
+
+**Scheduled full sweep (refactoring mode, 100% mutation):**
+
+```yaml
+name: mutation
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+      - run: go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
+      - name: Full quality gate with 100% mutation
+        run: diffguard --paths internal/,cmd/ .
 ```
 
 ### GitLab CI
@@ -203,7 +236,7 @@ diffguard:
   stage: test
   script:
     - go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
-    - diffguard --skip-mutation --base origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME .
+    - diffguard --mutation-sample-rate 20 --base origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME .
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 ```
@@ -212,8 +245,20 @@ diffguard:
 
 ```bash
 #!/bin/sh
-# .git/hooks/pre-push
+# .git/hooks/pre-push  —  fast local check, skip mutation
 diffguard --skip-mutation --base develop .
+```
+
+### Local refactoring loop
+
+When iterating on a single file or package outside of a PR:
+
+```bash
+# Quality gate on the file being refactored
+diffguard --paths internal/foo/bar.go .
+
+# Or an entire subtree, e.g. while cleaning up a package
+diffguard --paths internal/foo/ .
 ```
 
 ## Example Output
