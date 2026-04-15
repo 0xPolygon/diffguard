@@ -43,6 +43,10 @@ type Options struct {
 	// (semantic mutations) below which the section is reported as WARN. Zero
 	// falls back to defaultTier2Threshold.
 	Tier2Threshold float64
+	// Workers caps the number of packages processed concurrently. Zero or
+	// negative means use runtime.NumCPU(). Mutants within a single package
+	// always run sequentially regardless of this setting.
+	Workers int
 }
 
 const (
@@ -69,6 +73,13 @@ func (o Options) tier2Threshold() float64 {
 		return defaultTier2Threshold
 	}
 	return o.Tier2Threshold
+}
+
+func (o Options) workers() int {
+	if o.Workers <= 0 {
+		return runtime.NumCPU()
+	}
+	return o.Workers
 }
 
 // Analyze applies mutation operators to changed code and runs tests.
@@ -106,11 +117,12 @@ func collectMutants(repoPath string, d *diff.Result) []Mutant {
 
 // runMutantsParallel processes mutants in parallel, serializing within a
 // package directory to avoid racing on file writes and go test runs.
-// Mutants in different packages run concurrently up to runtime.NumCPU().
+// Mutants in different packages run concurrently up to opts.workers()
+// (which defaults to runtime.NumCPU()).
 func runMutantsParallel(repoPath string, mutants []Mutant, opts Options) int {
 	groups := groupByPackage(mutants)
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, runtime.NumCPU())
+	sem := make(chan struct{}, opts.workers())
 
 	for _, group := range groups {
 		wg.Add(1)

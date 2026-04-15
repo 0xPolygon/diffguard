@@ -152,6 +152,7 @@ Flags:
   --mutation-sample-rate float    Percentage of mutants to test, 0-100 (default 100)
   --test-timeout duration         Per-mutant go test timeout (default 30s)
   --test-pattern string           Pattern passed to `go test -run` for each mutant (scopes tests to speed up slow suites)
+  --mutation-workers int          Max packages processed concurrently during mutation testing; 0 = runtime.NumCPU() (default 0)
   --tier1-threshold float         Minimum kill % for Tier-1 (logic) mutations; below triggers FAIL (default 90)
   --tier2-threshold float         Minimum kill % for Tier-2 (semantic) mutations; below triggers WARN (default 70)
   --output string                 Output format: text, json (default "text")

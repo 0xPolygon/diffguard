@@ -27,6 +27,7 @@ func main() {
 	flag.Float64Var(&cfg.MutationSampleRate, "mutation-sample-rate", 100, "Percentage of mutants to test, 0-100")
 	flag.DurationVar(&cfg.TestTimeout, "test-timeout", 30*time.Second, "Per-mutant test binary timeout (e.g. 60s, 2m)")
 	flag.StringVar(&cfg.TestPattern, "test-pattern", "", "Test name pattern passed to `go test -run` for each mutant (speeds up mutation testing on packages with slow suites)")
+	flag.IntVar(&cfg.MutationWorkers, "mutation-workers", 0, "Max packages processed concurrently during mutation testing; 0 = runtime.NumCPU()")
 	flag.Float64Var(&cfg.Tier1Threshold, "tier1-threshold", 90, "Minimum kill % for Tier-1 (logic) mutations; below triggers FAIL")
 	flag.Float64Var(&cfg.Tier2Threshold, "tier2-threshold", 70, "Minimum kill % for Tier-2 (semantic) mutations; below triggers WARN. Tier-3 (observability) is report-only.")
 	flag.StringVar(&cfg.Output, "output", "text", "Output format: text, json")
@@ -66,6 +67,7 @@ type Config struct {
 	MutationSampleRate    float64
 	TestTimeout           time.Duration
 	TestPattern           string
+	MutationWorkers       int
 	Tier1Threshold        float64
 	Tier2Threshold        float64
 	Output                string
@@ -139,6 +141,7 @@ func runAnalyses(repoPath string, d *diff.Result, cfg Config) ([]report.Section,
 			SampleRate:     cfg.MutationSampleRate,
 			TestTimeout:    cfg.TestTimeout,
 			TestPattern:    cfg.TestPattern,
+			Workers:        cfg.MutationWorkers,
 			Tier1Threshold: cfg.Tier1Threshold,
 			Tier2Threshold: cfg.Tier2Threshold,
 		})

@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -347,6 +348,26 @@ func TestOptionsTimeout_Default(t *testing.T) {
 	opts := Options{}
 	if opts.timeout() != 30*1000*1000*1000 { // 30 seconds in ns
 		t.Errorf("default timeout = %v, want 30s", opts.timeout())
+	}
+}
+
+func TestOptionsWorkers(t *testing.T) {
+	// Zero → NumCPU.
+	zero := Options{}
+	if got, want := zero.workers(), runtime.NumCPU(); got != want {
+		t.Errorf("zero workers = %d, want runtime.NumCPU() = %d", got, want)
+	}
+
+	// Negative → NumCPU (treat as unset).
+	neg := Options{Workers: -4}
+	if got, want := neg.workers(), runtime.NumCPU(); got != want {
+		t.Errorf("negative workers = %d, want runtime.NumCPU() = %d", got, want)
+	}
+
+	// Explicit positive value is honored.
+	explicit := Options{Workers: 3}
+	if got := explicit.workers(); got != 3 {
+		t.Errorf("explicit workers = %d, want 3", got)
 	}
 }
 
