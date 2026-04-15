@@ -290,58 +290,6 @@ func f() {
 	}
 }
 
-// --- Parallel execution tests ---
-
-func TestGroupByPackage(t *testing.T) {
-	mutants := []Mutant{
-		{File: "a/foo.go", Line: 1},
-		{File: "a/bar.go", Line: 1},
-		{File: "b/baz.go", Line: 1},
-	}
-	groups := groupByPackage(mutants)
-	if len(groups) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(groups))
-	}
-	total := 0
-	for _, g := range groups {
-		total += len(g)
-	}
-	if total != 3 {
-		t.Errorf("expected 3 total mutants across groups, got %d", total)
-	}
-}
-
-func TestGroupByPackage_SamePackage(t *testing.T) {
-	mutants := []Mutant{
-		{File: "pkg/a.go", Line: 1},
-		{File: "pkg/a.go", Line: 5},
-		{File: "pkg/b.go", Line: 1},
-	}
-	groups := groupByPackage(mutants)
-	if len(groups) != 1 {
-		t.Errorf("expected 1 group for same package, got %d", len(groups))
-	}
-	if len(groups[0]) != 3 {
-		t.Errorf("expected 3 mutants in the single group, got %d", len(groups[0]))
-	}
-}
-
-func TestGroupByPackage_PointersIntoOriginal(t *testing.T) {
-	// Verify groupByPackage returns pointers into the original slice,
-	// so goroutines writing m.Killed will be visible to the caller.
-	mutants := []Mutant{
-		{File: "pkg/a.go", Line: 1},
-		{File: "pkg/a.go", Line: 2},
-	}
-	groups := groupByPackage(mutants)
-	// Mutate via the group pointer
-	groups[0][0].Killed = true
-	// Original slice should see the change
-	if !mutants[0].Killed {
-		t.Error("expected original mutant to be updated via group pointer")
-	}
-}
-
 // --- Options tests ---
 
 func TestOptionsTimeout_Default(t *testing.T) {
@@ -371,11 +319,38 @@ func TestOptionsWorkers(t *testing.T) {
 	}
 }
 
+func TestWriteOverlayJSON(t *testing.T) {
+	dir := t.TempDir()
+	overlayPath := filepath.Join(dir, "overlay.json")
+	if err := writeOverlayJSON(overlayPath, "/orig/foo.go", "/tmp/mutated.go"); err != nil {
+		t.Fatalf("writeOverlayJSON error: %v", err)
+	}
+	data, err := os.ReadFile(overlayPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Must be the exact shape go test -overlay expects:
+	// {"Replace":{"<original>":"<mutant>"}}
+	expected := `{"Replace":{"/orig/foo.go":"/tmp/mutated.go"}}`
+	if string(data) != expected {
+		t.Errorf("overlay JSON = %q, want %q", string(data), expected)
+	}
+}
+
 func TestBuildTestArgs_Default(t *testing.T) {
-	args := buildTestArgs(Options{})
-	// Should be: test -count=1 -timeout 30s ./...
+	args := buildTestArgs(Options{}, "/tmp/overlay.json")
 	if args[0] != "test" {
 		t.Errorf("args[0] = %q, want test", args[0])
+	}
+	// -overlay must always be present
+	foundOverlay := false
+	for _, a := range args {
+		if a == "-overlay=/tmp/overlay.json" {
+			foundOverlay = true
+		}
+	}
+	if !foundOverlay {
+		t.Errorf("expected -overlay=/tmp/overlay.json in args, got %v", args)
 	}
 	// No -run flag in default case
 	for _, a := range args {
@@ -386,7 +361,7 @@ func TestBuildTestArgs_Default(t *testing.T) {
 }
 
 func TestBuildTestArgs_WithPattern(t *testing.T) {
-	args := buildTestArgs(Options{TestPattern: "TestFoo"})
+	args := buildTestArgs(Options{TestPattern: "TestFoo"}, "/tmp/overlay.json")
 	found := false
 	for i, a := range args {
 		if a == "-run" && i+1 < len(args) && args[i+1] == "TestFoo" {
