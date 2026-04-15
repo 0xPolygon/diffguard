@@ -19,10 +19,10 @@ coverage: ## Generate coverage.out and print the per-package summary
 	go test ./... -coverprofile=coverage.out -covermode=atomic
 	@go tool cover -func=coverage.out | tail -1
 
-check-fast: build ## Run complexity / size / deps / churn against the whole tree (skips mutation)
-	./$(BINARY) --skip-mutation --paths $(PATHS) .
+check-fast: build ## Run the full quality gate with sampled mutation testing (~20%)
+	./$(BINARY) --mutation-sample-rate 20 --paths $(PATHS) .
 
-check: build ## Run the full quality gate including mutation testing (slow)
+check: build ## Run the full quality gate including 100% mutation testing (slow)
 	./$(BINARY) --paths $(PATHS) .
 
 check-mutation: build ## Only the mutation section, full codebase

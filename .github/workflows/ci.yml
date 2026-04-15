@@ -32,8 +32,8 @@ jobs:
 
   diffguard:
     # Dogfooding: run diffguard's own quality gate against this repo.
-    # Mutation testing is skipped here because it's slow; the `mutation`
-    # workflow runs it weekly.
+    # Mutation testing runs at 20% sample rate here as a fast smoke
+    # check; the `mutation` workflow runs the full 100% weekly.
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -51,8 +51,8 @@ jobs:
 
       - name: Run diffguard (PR — diff mode)
         if: github.event_name == 'pull_request'
-        run: ./diffguard --skip-mutation --base origin/${{ github.base_ref }} .
+        run: ./diffguard --mutation-sample-rate 20 --base origin/${{ github.base_ref }} .
 
       - name: Run diffguard (push — refactoring mode)
         if: github.event_name == 'push'
-        run: ./diffguard --skip-mutation --paths internal/,cmd/ .
+        run: ./diffguard --mutation-sample-rate 20 --paths internal/,cmd/ .
