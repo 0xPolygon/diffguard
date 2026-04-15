@@ -27,6 +27,10 @@ diffguard /path/to/repo
 # Specify a base branch
 diffguard --base main /path/to/repo
 
+# Refactoring mode: analyze entire files/dirs (no diff required)
+diffguard --paths internal/foo/bar.go /path/to/repo
+diffguard --paths internal/foo/,internal/bar/ /path/to/repo
+
 # Skip mutation testing (faster)
 diffguard --skip-mutation /path/to/repo
 
@@ -40,6 +44,12 @@ diffguard \
   --file-size-threshold 800 \
   /path/to/repo
 ```
+
+### Modes
+
+**Diff mode (default):** Analyzes only the regions changed between `HEAD` and the base branch. Use this as a CI gate for PRs.
+
+**Refactoring mode (`--paths`):** Analyzes the full content of the specified files or directories, ignoring git diff entirely. Use this when iterating on an existing file's quality without a base to compare against.
 
 ## What It Measures
 
@@ -95,6 +105,7 @@ diffguard [flags] <repo-path>
 
 Flags:
   --base string                   Base branch to diff against (default: auto-detect)
+  --paths string                  Comma-separated files/dirs to analyze in full (refactoring mode); skips git diff
   --complexity-threshold int      Maximum cognitive complexity per function (default 10)
   --function-size-threshold int   Maximum lines per function (default 50)
   --file-size-threshold int       Maximum lines per file (default 500)

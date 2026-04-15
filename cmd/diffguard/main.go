@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/0xPolygon/diffguard/internal/churn"
 	"github.com/0xPolygon/diffguard/internal/complexity"
@@ -26,6 +27,7 @@ func main() {
 	flag.StringVar(&cfg.Output, "output", "text", "Output format: text, json")
 	flag.StringVar(&cfg.FailOn, "fail-on", "warn", "Exit non-zero if thresholds breached: none, warn, all")
 	flag.StringVar(&cfg.BaseBranch, "base", "", "Base branch to diff against (default: auto-detect)")
+	flag.StringVar(&cfg.Paths, "paths", "", "Comma-separated files/dirs to analyze in full (refactoring mode); skips git diff")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -40,7 +42,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cfg.BaseBranch == "" {
+	if cfg.Paths == "" && cfg.BaseBranch == "" {
 		cfg.BaseBranch = detectBaseBranch(repoPath)
 	}
 
@@ -60,20 +62,25 @@ type Config struct {
 	Output                string
 	FailOn                string
 	BaseBranch            string
+	Paths                 string
 }
 
 func run(repoPath string, cfg Config) error {
-	d, err := diff.Parse(repoPath, cfg.BaseBranch)
+	d, err := loadFiles(repoPath, cfg)
 	if err != nil {
-		return fmt.Errorf("parsing diff: %w", err)
+		return err
 	}
 
 	if len(d.Files) == 0 {
-		fmt.Println("No changed Go files found in diff.")
+		fmt.Println("No Go files found.")
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "Analyzing %d changed Go files against %s...\n", len(d.Files), cfg.BaseBranch)
+	if cfg.Paths != "" {
+		fmt.Fprintf(os.Stderr, "Analyzing %d Go files (refactoring mode)...\n", len(d.Files))
+	} else {
+		fmt.Fprintf(os.Stderr, "Analyzing %d changed Go files against %s...\n", len(d.Files), cfg.BaseBranch)
+	}
 
 	var sections []report.Section
 
@@ -137,6 +144,25 @@ func checkExitCode(r report.Report, failOn string) error {
 		}
 	}
 	return nil
+}
+
+func loadFiles(repoPath string, cfg Config) (*diff.Result, error) {
+	if cfg.Paths != "" {
+		paths := strings.Split(cfg.Paths, ",")
+		for i := range paths {
+			paths[i] = strings.TrimSpace(paths[i])
+		}
+		d, err := diff.CollectPaths(repoPath, paths)
+		if err != nil {
+			return nil, fmt.Errorf("collecting paths: %w", err)
+		}
+		return d, nil
+	}
+	d, err := diff.Parse(repoPath, cfg.BaseBranch)
+	if err != nil {
+		return nil, fmt.Errorf("parsing diff: %w", err)
+	}
+	return d, nil
 }
 
 func detectBaseBranch(repoPath string) string {

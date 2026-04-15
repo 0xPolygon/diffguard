@@ -3,6 +3,9 @@ package diff
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
+	"math"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -102,6 +105,75 @@ func Parse(repoPath, baseBranch string) (*Result, error) {
 		BaseBranch: baseBranch,
 		Files:      files,
 	}, nil
+}
+
+// CollectPaths builds a Result by treating each .go file under the given
+// paths as fully changed. Useful for refactoring mode where you want to
+// analyze entire files rather than diffed regions only.
+//
+// paths may contain individual files or directories (walked recursively).
+// Test files (_test.go) are excluded to match Parse's behavior.
+func CollectPaths(repoPath string, paths []string) (*Result, error) {
+	var files []FileChange
+	seen := make(map[string]bool)
+
+	for _, p := range paths {
+		if err := collectPath(repoPath, p, &files, seen); err != nil {
+			return nil, err
+		}
+	}
+
+	return &Result{Files: files}, nil
+}
+
+func collectPath(repoPath, p string, files *[]FileChange, seen map[string]bool) error {
+	absPath := p
+	if !filepath.IsAbs(p) {
+		absPath = filepath.Join(repoPath, p)
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", p, err)
+	}
+	if info.IsDir() {
+		return collectDir(repoPath, absPath, files, seen)
+	}
+	return addFile(repoPath, absPath, files, seen)
+}
+
+func collectDir(repoPath, absPath string, files *[]FileChange, seen map[string]bool) error {
+	return filepath.WalkDir(absPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !isAnalyzableGoFile(path) {
+			return nil
+		}
+		return addFile(repoPath, path, files, seen)
+	})
+}
+
+func addFile(repoPath, absPath string, files *[]FileChange, seen map[string]bool) error {
+	if !isAnalyzableGoFile(absPath) {
+		return nil
+	}
+	rel, err := filepath.Rel(repoPath, absPath)
+	if err != nil {
+		return err
+	}
+	if seen[rel] {
+		return nil
+	}
+	seen[rel] = true
+	*files = append(*files, FileChange{
+		Path:    rel,
+		Regions: []ChangedRegion{{StartLine: 1, EndLine: math.MaxInt32}},
+	})
+	return nil
+}
+
+func isAnalyzableGoFile(path string) bool {
+	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
 }
 
 // parseUnifiedDiff parses the output of git diff -U0 into FileChange entries.

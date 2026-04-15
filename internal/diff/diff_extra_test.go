@@ -1,8 +1,147 @@
 package diff
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestCollectPaths_SingleFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "foo.go")
+	os.WriteFile(fp, []byte("package x\n\nfunc f() {}\n"), 0644)
+
+	r, err := CollectPaths(dir, []string{"foo.go"})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(r.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(r.Files))
+	}
+	if r.Files[0].Path != "foo.go" {
+		t.Errorf("path = %q, want foo.go", r.Files[0].Path)
+	}
+	if len(r.Files[0].Regions) != 1 {
+		t.Fatalf("expected 1 region, got %d", len(r.Files[0].Regions))
+	}
+	if r.Files[0].Regions[0].StartLine != 1 {
+		t.Errorf("StartLine = %d, want 1", r.Files[0].Regions[0].StartLine)
+	}
+	// EndLine should be huge so any function in the file is "in range"
+	if r.Files[0].Regions[0].EndLine < 1<<20 {
+		t.Errorf("EndLine = %d, want very large", r.Files[0].Regions[0].EndLine)
+	}
+}
+
+func TestCollectPaths_SkipsTestFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "foo.go"), []byte("package x\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "foo_test.go"), []byte("package x\n"), 0644)
+
+	r, err := CollectPaths(dir, []string{"foo_test.go"})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(r.Files) != 0 {
+		t.Errorf("expected 0 files (test files skipped), got %d", len(r.Files))
+	}
+}
+
+func TestCollectPaths_Directory(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0755)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package x\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.go"), []byte("package x\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "a_test.go"), []byte("package x\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("readme\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "sub", "c.go"), []byte("package x\n"), 0644)
+
+	r, err := CollectPaths(dir, []string{"."})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	// Should have a.go, b.go, sub/c.go (3 files); skip _test.go and README.md
+	if len(r.Files) != 3 {
+		t.Errorf("expected 3 files, got %d: %v", len(r.Files), filenames(r.Files))
+	}
+}
+
+func TestCollectPaths_NonexistentPath(t *testing.T) {
+	dir := t.TempDir()
+	_, err := CollectPaths(dir, []string{"nonexistent.go"})
+	if err == nil {
+		t.Error("expected error for nonexistent path")
+	}
+}
+
+func TestCollectPaths_MultiplePaths(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "pkg1"), 0755)
+	os.MkdirAll(filepath.Join(dir, "pkg2"), 0755)
+	os.WriteFile(filepath.Join(dir, "pkg1", "a.go"), []byte("package pkg1\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "pkg2", "b.go"), []byte("package pkg2\n"), 0644)
+
+	r, err := CollectPaths(dir, []string{"pkg1", "pkg2"})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(r.Files) != 2 {
+		t.Errorf("expected 2 files, got %d", len(r.Files))
+	}
+}
+
+func TestCollectPaths_Deduplicates(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package x\n"), 0644)
+
+	// Pass the same file via both file path and dir
+	r, err := CollectPaths(dir, []string{"a.go", "."})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(r.Files) != 1 {
+		t.Errorf("expected 1 unique file, got %d", len(r.Files))
+	}
+}
+
+func TestCollectPaths_SkipsNonGoFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("notes"), 0644)
+
+	r, err := CollectPaths(dir, []string{"notes.txt"})
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(r.Files) != 0 {
+		t.Errorf("expected 0 files for non-Go file, got %d", len(r.Files))
+	}
+}
+
+func TestIsAnalyzableGoFile(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"foo.go", true},
+		{"foo_test.go", false},
+		{"foo.txt", false},
+		{"path/to/foo.go", true},
+		{"path/to/foo_test.go", false},
+	}
+	for _, tt := range tests {
+		if got := isAnalyzableGoFile(tt.path); got != tt.want {
+			t.Errorf("isAnalyzableGoFile(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+func filenames(files []FileChange) []string {
+	out := make([]string, len(files))
+	for i, f := range files {
+		out[i] = f.Path
+	}
+	return out
+}
 
 func TestHandleFileLine_GoFile(t *testing.T) {
 	var files []FileChange
