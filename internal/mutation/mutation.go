@@ -3,15 +3,12 @@ package mutation
 import (
 	"bytes"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/printer"
-	"go/token"
 	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/0xPolygon/diffguard/internal/diff"
@@ -28,18 +25,27 @@ type Mutant struct {
 	TestOutput  string
 }
 
-// Analyze applies mutation operators to changed code and runs tests.
-func Analyze(repoPath string, d *diff.Result, sampleRate float64) (report.Section, error) {
-	var allMutants []Mutant
+// Options configures a mutation testing run.
+type Options struct {
+	// SampleRate is the percentage (0-100) of generated mutants to actually test.
+	SampleRate float64
+	// TestTimeout is the per-mutant timeout passed to `go test -timeout`.
+	// Zero means use the default (30s).
+	TestTimeout time.Duration
+	// TestPattern, if non-empty, is passed to `go test -run` to scope tests.
+	TestPattern string
+}
 
-	for _, fc := range d.Files {
-		absPath := filepath.Join(repoPath, fc.Path)
-		mutants, err := generateMutants(absPath, fc)
-		if err != nil {
-			continue
-		}
-		allMutants = append(allMutants, mutants...)
+func (o Options) timeout() time.Duration {
+	if o.TestTimeout <= 0 {
+		return 30 * time.Second
 	}
+	return o.TestTimeout
+}
+
+// Analyze applies mutation operators to changed code and runs tests.
+func Analyze(repoPath string, d *diff.Result, opts Options) (report.Section, error) {
+	allMutants := collectMutants(repoPath, d)
 
 	if len(allMutants) == 0 {
 		return report.Section{
@@ -49,124 +55,73 @@ func Analyze(repoPath string, d *diff.Result, sampleRate float64) (report.Sectio
 		}, nil
 	}
 
-	if sampleRate < 100 {
-		allMutants = sampleMutants(allMutants, sampleRate)
+	if opts.SampleRate < 100 {
+		allMutants = sampleMutants(allMutants, opts.SampleRate)
 	}
 
-	killed := 0
-	for i := range allMutants {
-		allMutants[i].Killed = runMutant(repoPath, &allMutants[i])
-		if allMutants[i].Killed {
-			killed++
-		}
-	}
-
+	killed := runMutantsParallel(repoPath, allMutants, opts)
 	return buildSection(allMutants, killed), nil
 }
 
-// generateMutants parses a file and creates mutants for changed regions.
-func generateMutants(absPath string, fc diff.FileChange) ([]Mutant, error) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, absPath, nil, parser.ParseComments)
-	if err != nil {
-		return nil, err
+func collectMutants(repoPath string, d *diff.Result) []Mutant {
+	var all []Mutant
+	for _, fc := range d.Files {
+		absPath := filepath.Join(repoPath, fc.Path)
+		mutants, err := generateMutants(absPath, fc)
+		if err != nil {
+			continue
+		}
+		all = append(all, mutants...)
 	}
-
-	var mutants []Mutant
-
-	ast.Inspect(f, func(n ast.Node) bool {
-		if n == nil {
-			return true
-		}
-
-		line := fset.Position(n.Pos()).Line
-		if !fc.ContainsLine(line) {
-			return true
-		}
-
-		switch node := n.(type) {
-		case *ast.BinaryExpr:
-			mutants = append(mutants, binaryMutants(fc.Path, line, node)...)
-		case *ast.Ident:
-			mutants = append(mutants, boolMutants(fc.Path, line, node)...)
-		case *ast.ReturnStmt:
-			mutants = append(mutants, returnMutants(fc.Path, line, node)...)
-		}
-
-		return true
-	})
-
-	return mutants, nil
+	return all
 }
 
-// binaryMutants generates mutations for binary expressions.
-func binaryMutants(file string, line int, expr *ast.BinaryExpr) []Mutant {
-	replacements := map[token.Token][]token.Token{
-		token.GTR: {token.GEQ},
-		token.LSS: {token.LEQ},
-		token.GEQ: {token.GTR},
-		token.LEQ: {token.LSS},
-		token.EQL: {token.NEQ},
-		token.NEQ: {token.EQL},
-		token.ADD: {token.SUB},
-		token.SUB: {token.ADD},
-		token.MUL: {token.QUO},
-		token.QUO: {token.MUL},
-	}
+// runMutantsParallel processes mutants in parallel, serializing within a
+// package directory to avoid racing on file writes and go test runs.
+// Mutants in different packages run concurrently up to runtime.NumCPU().
+func runMutantsParallel(repoPath string, mutants []Mutant, opts Options) int {
+	groups := groupByPackage(mutants)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, runtime.NumCPU())
 
-	targets, ok := replacements[expr.Op]
-	if !ok {
-		return nil
+	for _, group := range groups {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(ms []*Mutant) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			for _, m := range ms {
+				m.Killed = runMutant(repoPath, m, opts)
+			}
+		}(group)
 	}
+	wg.Wait()
 
-	var mutants []Mutant
-	for _, newOp := range targets {
-		mutants = append(mutants, Mutant{
-			File:        file,
-			Line:        line,
-			Description: fmt.Sprintf("%s -> %s", expr.Op, newOp),
-			Operator:    operatorName(expr.Op, newOp),
-		})
+	killed := 0
+	for i := range mutants {
+		if mutants[i].Killed {
+			killed++
+		}
 	}
-
-	return mutants
+	return killed
 }
 
-// boolMutants generates true <-> false mutations.
-func boolMutants(file string, line int, ident *ast.Ident) []Mutant {
-	if ident.Name != "true" && ident.Name != "false" {
-		return nil
+func groupByPackage(mutants []Mutant) [][]*Mutant {
+	byPkg := make(map[string][]*Mutant)
+	for i := range mutants {
+		m := &mutants[i]
+		pkgDir := filepath.Dir(m.File)
+		byPkg[pkgDir] = append(byPkg[pkgDir], m)
 	}
-
-	newVal := "true"
-	if ident.Name == "true" {
-		newVal = "false"
+	var out [][]*Mutant
+	for _, g := range byPkg {
+		out = append(out, g)
 	}
-
-	return []Mutant{{
-		File:        file,
-		Line:        line,
-		Description: fmt.Sprintf("%s -> %s", ident.Name, newVal),
-		Operator:    "boolean_substitution",
-	}}
-}
-
-// returnMutants generates zero-value return mutations.
-func returnMutants(file string, line int, ret *ast.ReturnStmt) []Mutant {
-	if len(ret.Results) == 0 {
-		return nil
-	}
-
-	return []Mutant{{
-		File:        file,
-		Line:        line,
-		Description: "replace return values with zero values",
-		Operator:    "return_value",
-	}}
+	return out
 }
 
 // runMutant applies a mutation, runs tests, and returns whether it was killed.
-func runMutant(repoPath string, m *Mutant) bool {
+func runMutant(repoPath string, m *Mutant, opts Options) bool {
 	absPath := filepath.Join(repoPath, m.File)
 
 	original, err := os.ReadFile(absPath)
@@ -184,7 +139,7 @@ func runMutant(repoPath string, m *Mutant) bool {
 	}
 
 	pkgDir := filepath.Dir(absPath)
-	cmd := exec.Command("go", "test", "-count=1", "-timeout", "30s", "./...")
+	cmd := exec.Command("go", buildTestArgs(opts)...)
 	cmd.Dir = pkgDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -196,144 +151,16 @@ func runMutant(repoPath string, m *Mutant) bool {
 		m.TestOutput = stderr.String()
 		return true
 	}
-
 	return false
 }
 
-// applyMutation re-parses the file and applies the specific mutation.
-func applyMutation(absPath string, m *Mutant) []byte {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, absPath, nil, parser.ParseComments)
-	if err != nil {
-		return nil
+func buildTestArgs(opts Options) []string {
+	args := []string{"test", "-count=1", "-timeout", opts.timeout().String()}
+	if opts.TestPattern != "" {
+		args = append(args, "-run", opts.TestPattern)
 	}
-
-	if !applyMutationToAST(fset, f, m) {
-		return nil
-	}
-
-	return renderFile(fset, f)
-}
-
-func applyMutationToAST(fset *token.FileSet, f *ast.File, m *Mutant) bool {
-	applied := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		if applied || n == nil {
-			return false
-		}
-		if fset.Position(n.Pos()).Line != m.Line {
-			return true
-		}
-		applied = tryApplyMutation(n, m)
-		return !applied
-	})
-	return applied
-}
-
-func tryApplyMutation(n ast.Node, m *Mutant) bool {
-	switch m.Operator {
-	case "conditional_boundary", "negate_conditional", "math_operator":
-		return applyBinaryMutation(n, m)
-	case "boolean_substitution":
-		return applyBoolMutation(n, m)
-	case "return_value":
-		return applyReturnMutation(n)
-	}
-	return false
-}
-
-func applyBinaryMutation(n ast.Node, m *Mutant) bool {
-	expr, ok := n.(*ast.BinaryExpr)
-	if !ok {
-		return false
-	}
-	newOp := parseMutationOp(m.Description)
-	if newOp == token.ILLEGAL {
-		return false
-	}
-	expr.Op = newOp
-	return true
-}
-
-func applyBoolMutation(n ast.Node, m *Mutant) bool {
-	ident, ok := n.(*ast.Ident)
-	if !ok || (ident.Name != "true" && ident.Name != "false") {
-		return false
-	}
-	if strings.Contains(m.Description, "-> true") {
-		ident.Name = "true"
-	} else {
-		ident.Name = "false"
-	}
-	return true
-}
-
-func applyReturnMutation(n ast.Node) bool {
-	ret, ok := n.(*ast.ReturnStmt)
-	if !ok {
-		return false
-	}
-	for i := range ret.Results {
-		ret.Results[i] = zeroValueExpr(ret.Results[i])
-	}
-	return true
-}
-
-func parseMutationOp(desc string) token.Token {
-	parts := strings.Split(desc, " -> ")
-	if len(parts) != 2 {
-		return token.ILLEGAL
-	}
-
-	opMap := map[string]token.Token{
-		">": token.GTR, ">=": token.GEQ,
-		"<": token.LSS, "<=": token.LEQ,
-		"==": token.EQL, "!=": token.NEQ,
-		"+": token.ADD, "-": token.SUB,
-		"*": token.MUL, "/": token.QUO,
-	}
-
-	if op, ok := opMap[parts[1]]; ok {
-		return op
-	}
-	return token.ILLEGAL
-}
-
-func zeroValueExpr(expr ast.Expr) ast.Expr {
-	return &ast.Ident{Name: "nil", NamePos: expr.Pos()}
-}
-
-func renderFile(fset *token.FileSet, f *ast.File) []byte {
-	var buf bytes.Buffer
-	if err := printer.Fprint(&buf, fset, f); err != nil {
-		return nil
-	}
-	return buf.Bytes()
-}
-
-func operatorName(from, to token.Token) string {
-	switch {
-	case isBoundary(from) || isBoundary(to):
-		return "conditional_boundary"
-	case isComparison(from) || isComparison(to):
-		return "negate_conditional"
-	case isMath(from) || isMath(to):
-		return "math_operator"
-	default:
-		return "unknown"
-	}
-}
-
-func isBoundary(t token.Token) bool {
-	return t == token.GTR || t == token.GEQ || t == token.LSS || t == token.LEQ
-}
-
-func isComparison(t token.Token) bool {
-	return t == token.EQL || t == token.NEQ
-}
-
-func isMath(t token.Token) bool {
-	return t == token.ADD || t == token.SUB || t == token.MUL || t == token.QUO
+	args = append(args, "./...")
+	return args
 }
 
 func sampleMutants(mutants []Mutant, rate float64) []Mutant {
@@ -367,17 +194,7 @@ func buildSection(mutants []Mutant, killed int) report.Section {
 		sev = report.SeverityWarn
 	}
 
-	var findings []report.Finding
-	for _, m := range mutants {
-		if !m.Killed {
-			findings = append(findings, report.Finding{
-				File:     m.File,
-				Line:     m.Line,
-				Message:  fmt.Sprintf("SURVIVED: %s (%s)", m.Description, m.Operator),
-				Severity: report.SeverityFail,
-			})
-		}
-	}
+	findings := survivedFindings(mutants)
 
 	summary := fmt.Sprintf("Score: %.1f%% (%d/%d killed, %d survived)",
 		score, killed, total, survived)
@@ -394,4 +211,20 @@ func buildSection(mutants []Mutant, killed int) report.Section {
 			"score":    score,
 		},
 	}
+}
+
+func survivedFindings(mutants []Mutant) []report.Finding {
+	var findings []report.Finding
+	for _, m := range mutants {
+		if m.Killed {
+			continue
+		}
+		findings = append(findings, report.Finding{
+			File:     m.File,
+			Line:     m.Line,
+			Message:  fmt.Sprintf("SURVIVED: %s (%s)", m.Description, m.Operator),
+			Severity: report.SeverityFail,
+		})
+	}
+	return findings
 }

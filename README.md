@@ -95,8 +95,29 @@ Applies mutations to changed code and runs tests to verify they catch the change
 | Math operator | `+` to `-`, `*` to `/` |
 | Boolean substitution | `true` to `false` |
 | Return value | Replace returns with zero values |
+| Increment/decrement | `x++` to `x--` and vice versa |
+| Branch removal | Empty the body of an `if` |
+| Statement deletion | Remove a bare function-call statement |
 
-Reports a mutation score (killed / total). Use `--skip-mutation` to skip this (it's slow on large diffs) or `--mutation-sample-rate 50` to test a random 50% subset.
+Reports a mutation score (killed / total). Mutants in different packages are tested in parallel (up to `runtime.NumCPU()` concurrent package runs). Use `--skip-mutation` to skip this, or `--mutation-sample-rate 50` to test a random 50% subset.
+
+**Silencing unavoidable survivors.** Some mutations can't realistically be killed (e.g., defensive error-check branches that tests can't exercise). Annotate those with comments:
+
+```go
+// mutator-disable-next-line
+if err != nil {
+    return fmt.Errorf("parse failed: %w", err)
+}
+
+// mutator-disable-func
+func defensiveHelper() error {
+    // ... entire function skipped
+}
+```
+
+Supported annotations:
+- `// mutator-disable-next-line` — skips mutations on the following source line
+- `// mutator-disable-func` — skips mutations in the enclosing function (the comment may sit inside the function or on a godoc line directly above it)
 
 ## CLI Reference
 
@@ -111,6 +132,8 @@ Flags:
   --file-size-threshold int       Maximum lines per file (default 500)
   --skip-mutation                 Skip mutation testing
   --mutation-sample-rate float    Percentage of mutants to test, 0-100 (default 100)
+  --test-timeout duration         Per-mutant go test timeout (default 30s)
+  --test-pattern string           Pattern passed to `go test -run` for each mutant (scopes tests to speed up slow suites)
   --output string                 Output format: text, json (default "text")
   --fail-on string                Exit non-zero if thresholds breached: none, warn, all (default "warn")
 ```
