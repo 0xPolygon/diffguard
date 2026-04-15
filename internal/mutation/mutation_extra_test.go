@@ -40,6 +40,37 @@ func TestApplyBinaryMutation_IllegalOp(t *testing.T) {
 	}
 }
 
+// TestApplyBinaryMutation_OperatorMismatch locks in the fix for a bug where
+// applyBinaryMutation rewrote the first BinaryExpr found on a line even
+// when its operator differed from the mutant's intended `from` op. E.g.
+// given mutant "!= -> ==", applying it to the outer `&&` of `a != nil && b`
+// must NOT succeed — otherwise `&&` gets replaced and the inner `!=` stays
+// untouched, producing a false-surviving mutant.
+func TestApplyBinaryMutation_OperatorMismatch(t *testing.T) {
+	expr := &ast.BinaryExpr{Op: token.LAND}
+	m := &Mutant{Description: "!= -> ==", Operator: "negate_conditional"}
+	if applyBinaryMutation(expr, m) {
+		t.Error("expected false when expr.Op (&&) does not match mutant's from-op (!=)")
+	}
+	if expr.Op != token.LAND {
+		t.Errorf("expr.Op = %v, want LAND (unchanged)", expr.Op)
+	}
+}
+
+// TestApplyBinaryMutation_MathOperatorMismatch: same fix for math operators
+// — `start + count - 1` parses with an outer SUB, and mutant "+ -> -" must
+// not no-op on that outer SUB.
+func TestApplyBinaryMutation_MathOperatorMismatch(t *testing.T) {
+	expr := &ast.BinaryExpr{Op: token.SUB}
+	m := &Mutant{Description: "+ -> -", Operator: "math_operator"}
+	if applyBinaryMutation(expr, m) {
+		t.Error("expected false when expr.Op (-) does not match mutant's from-op (+)")
+	}
+	if expr.Op != token.SUB {
+		t.Errorf("expr.Op = %v, want SUB (unchanged)", expr.Op)
+	}
+}
+
 func TestApplyBoolMutation_TrueToFalse(t *testing.T) {
 	ident := &ast.Ident{Name: "true"}
 	m := &Mutant{Description: "true -> false", Operator: "boolean_substitution"}

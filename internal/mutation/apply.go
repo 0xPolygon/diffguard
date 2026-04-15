@@ -101,11 +101,16 @@ func applyBinaryMutation(n ast.Node, m *Mutant) bool {
 	if !ok {
 		return false
 	}
-	newOp := parseMutationOp(m.Description)
-	if newOp == token.ILLEGAL {
+	// Verify the operator matches the mutant description. Without this
+	// check, the walker would rewrite the first BinaryExpr it finds on
+	// the line — e.g. the outer `&&` in `a != nil && b`, or the outer
+	// `-` in `a + b - 1` — producing a no-op instead of the intended
+	// mutation and leaving a false-surviving mutant.
+	from, to := parseMutationOp(m.Description)
+	if to == token.ILLEGAL || expr.Op != from {
 		return false
 	}
-	expr.Op = newOp
+	expr.Op = to
 	return true
 }
 
@@ -158,10 +163,12 @@ func applyBranchRemoval(n ast.Node) bool {
 	return true
 }
 
-func parseMutationOp(desc string) token.Token {
+// parseMutationOp parses a mutant description of the form "X -> Y" into
+// the (from, to) operator pair. Either token is ILLEGAL if parsing fails.
+func parseMutationOp(desc string) (from, to token.Token) {
 	parts := strings.Split(desc, " -> ")
 	if len(parts) != 2 {
-		return token.ILLEGAL
+		return token.ILLEGAL, token.ILLEGAL
 	}
 
 	opMap := map[string]token.Token{
@@ -172,10 +179,12 @@ func parseMutationOp(desc string) token.Token {
 		"*": token.MUL, "/": token.QUO,
 	}
 
-	if op, ok := opMap[parts[1]]; ok {
-		return op
+	fromOp, okFrom := opMap[parts[0]]
+	toOp, okTo := opMap[parts[1]]
+	if !okFrom || !okTo {
+		return token.ILLEGAL, token.ILLEGAL
 	}
-	return token.ILLEGAL
+	return fromOp, toOp
 }
 
 func zeroValueExpr(expr ast.Expr) ast.Expr {

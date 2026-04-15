@@ -162,18 +162,21 @@ func TestOperatorName(t *testing.T) {
 func TestParseMutationOp(t *testing.T) {
 	tests := []struct {
 		desc     string
-		expected token.Token
+		wantFrom token.Token
+		wantTo   token.Token
 	}{
-		{"> -> >=", token.GEQ},
-		{"== -> !=", token.NEQ},
-		{"+ -> -", token.SUB},
-		{"invalid", token.ILLEGAL},
+		{"> -> >=", token.GTR, token.GEQ},
+		{"== -> !=", token.EQL, token.NEQ},
+		{"+ -> -", token.ADD, token.SUB},
+		{"invalid", token.ILLEGAL, token.ILLEGAL},
+		{"+ -> unknown", token.ILLEGAL, token.ILLEGAL},
 	}
 
 	for _, tt := range tests {
-		got := parseMutationOp(tt.desc)
-		if got != tt.expected {
-			t.Errorf("parseMutationOp(%q) = %v, want %v", tt.desc, got, tt.expected)
+		gotFrom, gotTo := parseMutationOp(tt.desc)
+		if gotFrom != tt.wantFrom || gotTo != tt.wantTo {
+			t.Errorf("parseMutationOp(%q) = (%v, %v), want (%v, %v)",
+				tt.desc, gotFrom, gotTo, tt.wantFrom, tt.wantTo)
 		}
 	}
 }

@@ -313,3 +313,66 @@ func TestOverlapsRange_Empty(t *testing.T) {
 		t.Error("empty regions should not overlap anything")
 	}
 }
+
+// TestParseHunkHeader_InvalidFormat exercises the error-return path when the
+// hunk header doesn't have the expected @@ ... @@ framing.
+func TestParseHunkHeader_InvalidFormat(t *testing.T) {
+	_, err := parseHunkHeader("not a hunk header")
+	if err == nil {
+		t.Error("expected error for malformed hunk header")
+	}
+}
+
+// TestParseHunkHeader_NoPlusRange exercises the fallback error-return when
+// the header has @@ markers but no + range.
+func TestParseHunkHeader_NoPlusRange(t *testing.T) {
+	_, err := parseHunkHeader("@@ -10,3 @@ context only")
+	if err == nil {
+		t.Error("expected error when + range is missing")
+	}
+}
+
+// TestParseHunkHeader_NonNumericRange exercises the wrapped error from
+// parseRange when the + range contains non-integers.
+func TestParseHunkHeader_NonNumericRange(t *testing.T) {
+	_, err := parseHunkHeader("@@ -10,3 +abc,5 @@")
+	if err == nil {
+		t.Error("expected error for non-numeric start")
+	}
+
+	_, err = parseHunkHeader("@@ -10,3 +15,xyz @@")
+	if err == nil {
+		t.Error("expected error for non-numeric count")
+	}
+}
+
+// TestParseUnifiedDiff_TestFileFollowedByHunk ensures the `current != nil`
+// guard prevents processing hunks that come right after a filtered-out
+// (test-file) entry. Without the guard we'd dereference nil and panic.
+func TestParseUnifiedDiff_TestFileFollowedByHunk(t *testing.T) {
+	input := `diff --git a/a_test.go b/a_test.go
+--- a/a_test.go
++++ b/a_test.go
+@@ -1,0 +1,5 @@
++test content
+diff --git a/b.go b/b.go
+--- a/b.go
++++ b/b.go
+@@ -10,0 +11,3 @@
++new code
+`
+	files, err := parseUnifiedDiff(input)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file (b.go), got %d: %v", len(files), filenames(files))
+	}
+	if files[0].Path != "b.go" {
+		t.Errorf("path = %q, want b.go", files[0].Path)
+	}
+	// b.go's hunk should still be recorded even though a test file preceded it.
+	if len(files[0].Regions) != 1 {
+		t.Errorf("expected 1 region on b.go, got %d", len(files[0].Regions))
+	}
+}

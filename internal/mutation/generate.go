@@ -107,8 +107,16 @@ func boolMutants(file string, line int, ident *ast.Ident) []Mutant {
 }
 
 // returnMutants generates zero-value return mutations.
+//
+// Returns whose every result is already the literal identifier `nil` are
+// skipped: the zero-value mutation rewrites each result to `nil`, producing
+// an identical AST and therefore an equivalent mutant that can never be
+// killed. Including them only adds noise to the score.
 func returnMutants(file string, line int, ret *ast.ReturnStmt) []Mutant {
 	if len(ret.Results) == 0 {
+		return nil
+	}
+	if allLiteralNil(ret.Results) {
 		return nil
 	}
 
@@ -118,6 +126,18 @@ func returnMutants(file string, line int, ret *ast.ReturnStmt) []Mutant {
 		Description: "replace return values with zero values",
 		Operator:    "return_value",
 	}}
+}
+
+// allLiteralNil reports whether every expression is the bare identifier
+// `nil`. See returnMutants for why this suppresses mutant generation.
+func allLiteralNil(exprs []ast.Expr) bool {
+	for _, e := range exprs {
+		ident, ok := e.(*ast.Ident)
+		if !ok || ident.Name != "nil" {
+			return false
+		}
+	}
+	return true
 }
 
 // incdecMutants swaps ++ with -- and vice versa.
