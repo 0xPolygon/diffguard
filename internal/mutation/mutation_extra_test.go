@@ -250,56 +250,60 @@ func TestZeroValueExpr(t *testing.T) {
 
 func TestBuildSection_HighScore(t *testing.T) {
 	mutants := []Mutant{
-		{File: "a.go", Line: 1, Killed: true},
-		{File: "a.go", Line: 2, Killed: true},
-		{File: "a.go", Line: 3, Killed: true},
-		{File: "a.go", Line: 4, Killed: true},
-		{File: "a.go", Line: 5, Killed: true},
+		{File: "a.go", Line: 1, Killed: true, Operator: "negate_conditional"},
+		{File: "a.go", Line: 2, Killed: true, Operator: "negate_conditional"},
+		{File: "a.go", Line: 3, Killed: true, Operator: "negate_conditional"},
+		{File: "a.go", Line: 4, Killed: true, Operator: "negate_conditional"},
+		{File: "a.go", Line: 5, Killed: true, Operator: "negate_conditional"},
 	}
-	s := buildSection(mutants, 5)
+	s := buildSection(mutants, 5, Options{})
 	if s.Severity != report.SeverityPass {
 		t.Errorf("severity = %v, want PASS (100%% kill rate)", s.Severity)
 	}
 }
 
+// Low Tier-1 score fails the section because logic mutations surviving
+// almost always indicate a real test gap.
 func TestBuildSection_LowScore(t *testing.T) {
 	mutants := []Mutant{
-		{File: "a.go", Line: 1, Killed: true},
-		{File: "a.go", Line: 2, Killed: false, Description: "mut", Operator: "op"},
-		{File: "a.go", Line: 3, Killed: false, Description: "mut", Operator: "op"},
-		{File: "a.go", Line: 4, Killed: false, Description: "mut", Operator: "op"},
-		{File: "a.go", Line: 5, Killed: false, Description: "mut", Operator: "op"},
+		{File: "a.go", Line: 1, Killed: true, Operator: "negate_conditional"},
+		{File: "a.go", Line: 2, Killed: false, Description: "mut", Operator: "negate_conditional"},
+		{File: "a.go", Line: 3, Killed: false, Description: "mut", Operator: "negate_conditional"},
+		{File: "a.go", Line: 4, Killed: false, Description: "mut", Operator: "negate_conditional"},
+		{File: "a.go", Line: 5, Killed: false, Description: "mut", Operator: "negate_conditional"},
 	}
-	s := buildSection(mutants, 1)
+	s := buildSection(mutants, 1, Options{})
 	if s.Severity != report.SeverityFail {
-		t.Errorf("severity = %v, want FAIL (20%% kill rate)", s.Severity)
+		t.Errorf("severity = %v, want FAIL (Tier 1 at 20%% < default 90%%)", s.Severity)
 	}
 	if len(s.Findings) != 4 {
 		t.Errorf("findings = %d, want 4 (survived mutants)", len(s.Findings))
 	}
 }
 
+// Medium Tier-2 score produces a WARN but not FAIL.
 func TestBuildSection_MediumScore(t *testing.T) {
 	mutants := make([]Mutant, 10)
-	killed := 7
+	killed := 6 // 60% — below default Tier-2 threshold of 70.
 	for i := 0; i < killed; i++ {
-		mutants[i] = Mutant{File: "a.go", Line: i, Killed: true}
+		mutants[i] = Mutant{File: "a.go", Line: i, Killed: true, Operator: "boolean_substitution"}
 	}
 	for i := killed; i < 10; i++ {
-		mutants[i] = Mutant{File: "a.go", Line: i, Killed: false, Description: "mut", Operator: "op"}
+		mutants[i] = Mutant{File: "a.go", Line: i, Killed: false, Description: "mut", Operator: "boolean_substitution"}
 	}
-	s := buildSection(mutants, killed)
+	s := buildSection(mutants, killed, Options{})
 	if s.Severity != report.SeverityWarn {
-		t.Errorf("severity = %v, want WARN (70%% kill rate)", s.Severity)
+		t.Errorf("severity = %v, want WARN (Tier 2 at 60%% < default 70%%)", s.Severity)
 	}
 }
 
 func TestBuildSection_ZeroMutants(t *testing.T) {
-	s := buildSection(nil, 0)
-	// score calculation: 0/0 = 0, which is < 60 = FAIL
-	// But actually: total=0, score=0.0, sev=FAIL
-	// This is the no-mutants case called from Analyze
-	// In practice, Analyze returns early when len(allMutants)==0
+	s := buildSection(nil, 0, Options{})
+	// No mutants means nothing to gate on — severity should be PASS and
+	// stats should still be populated.
+	if s.Severity != report.SeverityPass {
+		t.Errorf("severity = %v, want PASS (no mutants to gate on)", s.Severity)
+	}
 	if s.Stats == nil {
 		t.Error("expected non-nil stats")
 	}

@@ -101,6 +101,24 @@ Applies mutations to changed code and runs tests to verify they catch the change
 
 Reports a mutation score (killed / total). Mutants in different packages are tested in parallel (up to `runtime.NumCPU()` concurrent package runs). Use `--skip-mutation` to skip this, or `--mutation-sample-rate 50` to test a random 50% subset.
 
+#### Tiered mutation scoring
+
+The raw score is misleading for observability-heavy Go codebases: `log.*` and `metrics.*` calls generate many `statement_deletion` and `branch_removal` survivors that tests can't observe by design. Diffguard groups operators into three tiers so you can gate CI on the ones that matter:
+
+| Tier | Operators | Gating |
+|------|-----------|--------|
+| **Tier 1 — logic** | `negate_conditional`, `conditional_boundary`, `return_value`, `math_operator` | FAIL below `--tier1-threshold` (default 90%) |
+| **Tier 2 — semantic** | `boolean_substitution`, `incdec` | WARN below `--tier2-threshold` (default 70%) |
+| **Tier 3 — observability** | `statement_deletion`, `branch_removal` | Reported only — never gates CI |
+
+The summary line surfaces the raw score followed by per-tier breakdowns:
+
+```
+Score: 74.0% (148/200 killed, 52 survived) | T1 logic: 92.0% (46/50) | T2 semantic: 78.0% (14/18) | T3 observability: 45.0% (40/90)
+```
+
+Tiers with zero mutants are omitted from the summary. Recommended CI policy: use the defaults (strict on Tier 1, advisory on Tier 2, ignore Tier 3). For gradual rollout on codebases with many pre-existing gaps, start with a lower `--tier1-threshold` and ratchet it up over time.
+
 **Silencing unavoidable survivors.** Some mutations can't realistically be killed (e.g., defensive error-check branches that tests can't exercise). Annotate those with comments:
 
 ```go
@@ -134,6 +152,8 @@ Flags:
   --mutation-sample-rate float    Percentage of mutants to test, 0-100 (default 100)
   --test-timeout duration         Per-mutant go test timeout (default 30s)
   --test-pattern string           Pattern passed to `go test -run` for each mutant (scopes tests to speed up slow suites)
+  --tier1-threshold float         Minimum kill % for Tier-1 (logic) mutations; below triggers FAIL (default 90)
+  --tier2-threshold float         Minimum kill % for Tier-2 (semantic) mutations; below triggers WARN (default 70)
   --output string                 Output format: text, json (default "text")
   --fail-on string                Exit non-zero if thresholds breached: none, warn, all (default "warn")
 ```
