@@ -2,7 +2,18 @@
 
 A targeted code quality gate for Go repositories. Analyzes either the changed regions of a git diff (CI mode) or specified files/directories (refactoring mode), and reports on complexity, size, dependency structure, churn risk, and mutation test coverage.
 
-Designed as a CI gate for AI-generated PRs — where line-by-line human review doesn't scale — with a refactoring mode for iterating on an existing file's quality locally.
+## Why
+
+Asking an AI agent to "refactor this" or "clean up the code" is ambiguous. "Make it simpler" produces different results every run, and there's no principled way to tell the agent when it's done — or to verify that "done" actually means better. Natural language isn't a specification.
+
+Diffguard turns "is this code good?" into a set of numbers an agent can iterate against:
+
+- Cognitive complexity ≤ 10 per function
+- Function bodies ≤ 50 lines, files ≤ 500 lines
+- No new dependency cycles or Stable Dependencies Principle violations
+- Tier‑1 mutation kill rate ≥ 90% (tests actually catch logic changes)
+
+Run diffguard, read the violations, change the code, run again — loop until it exits 0. The metrics become the spec. The agent has something objective to optimize for rather than guessing at taste, and you get a reproducible definition of "good enough" instead of having to re‑judge every diff by eye. Also useful for traditional human-written CI, but the real lift is on AI-generated PRs where line-by-line review doesn't scale.
 
 ## Install
 
