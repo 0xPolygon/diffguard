@@ -1,0 +1,189 @@
+# diffguard
+
+A diff-scoped code quality gate for Go repositories. Analyzes only changed code in a git diff and reports on complexity, size, dependency structure, churn risk, and mutation test coverage.
+
+Designed as a CI gate for AI-generated PRs, where line-by-line human review doesn't scale.
+
+## Install
+
+```bash
+go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/0xPolygon/diffguard.git
+cd diffguard
+go build -o diffguard ./cmd/diffguard/
+```
+
+## Usage
+
+```bash
+# Analyze changes against the auto-detected base branch
+diffguard /path/to/repo
+
+# Specify a base branch
+diffguard --base main /path/to/repo
+
+# Skip mutation testing (faster)
+diffguard --skip-mutation /path/to/repo
+
+# JSON output for CI ingestion
+diffguard --output json /path/to/repo
+
+# Custom thresholds
+diffguard \
+  --complexity-threshold 15 \
+  --function-size-threshold 80 \
+  --file-size-threshold 800 \
+  /path/to/repo
+```
+
+## What It Measures
+
+### Cognitive Complexity
+
+Computes [cognitive complexity](https://www.sonarsource.com/resources/cognitive-complexity/) (gocognit-style) for every function touched in the diff. Unlike cyclomatic complexity, cognitive complexity penalizes nested control flow more heavily than flat structures, better reflecting how hard code is to read.
+
+Scoring rules:
+- +1 for each `if`, `else if`, `else`, `for`, `switch`, `select`
+- +1 nesting penalty per nesting level for nested control structures
+- +1 per sequence of `&&`/`||` operators, +1 each time the operator switches
+
+Default threshold: **10** per function.
+
+### Function and File Sizes
+
+Measures lines of code for changed functions and files. Large functions and files are harder to review and more prone to bugs.
+
+Default thresholds: **50 lines** per function, **500 lines** per file.
+
+### Dependency Structure
+
+Builds a directed graph of internal package imports from changed packages and reports:
+
+- **Circular dependencies** (cycles) as errors.
+- **Afferent coupling** (Ca) -- how many packages depend on this one.
+- **Efferent coupling** (Ce) -- how many packages this one depends on.
+- **Instability** -- `Ce / (Ca + Ce)`. Packages with high instability (close to 1.0) change easily but shouldn't be depended on by many others.
+- **Stable Dependencies Principle violations** -- flags when a stable package depends on a less stable one.
+
+### Churn-Weighted Complexity
+
+Cross-references git history with complexity scores. Functions that are both complex AND frequently modified are the highest-risk targets for bugs. Reports the top 10 by `commits * complexity`.
+
+### Mutation Testing
+
+Applies mutations to changed code and runs tests to verify they catch the change:
+
+| Operator | Example |
+|----------|---------|
+| Conditional boundary | `>` to `>=`, `<` to `<=` |
+| Negate conditional | `==` to `!=`, `>` to `<` |
+| Math operator | `+` to `-`, `*` to `/` |
+| Boolean substitution | `true` to `false` |
+| Return value | Replace returns with zero values |
+
+Reports a mutation score (killed / total). Use `--skip-mutation` to skip this (it's slow on large diffs) or `--mutation-sample-rate 50` to test a random 50% subset.
+
+## CLI Reference
+
+```
+diffguard [flags] <repo-path>
+
+Flags:
+  --base string                   Base branch to diff against (default: auto-detect)
+  --complexity-threshold int      Maximum cognitive complexity per function (default 10)
+  --function-size-threshold int   Maximum lines per function (default 50)
+  --file-size-threshold int       Maximum lines per file (default 500)
+  --skip-mutation                 Skip mutation testing
+  --mutation-sample-rate float    Percentage of mutants to test, 0-100 (default 100)
+  --output string                 Output format: text, json (default "text")
+  --fail-on string                Exit non-zero if thresholds breached: none, warn, all (default "warn")
+```
+
+### Exit codes
+
+- `0` -- all checks passed (or `--fail-on none`)
+- `1` -- thresholds breached
+
+The `--fail-on` flag controls sensitivity:
+- `none` -- always exit 0
+- `warn` -- exit 1 only on FAIL severity (default)
+- `all` -- exit 1 on any WARN or FAIL
+
+## CI Integration
+
+### GitHub Actions
+
+```yaml
+name: diffguard
+on: [pull_request]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for git diff
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Install diffguard
+        run: go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
+
+      - name: Run diffguard
+        run: diffguard --skip-mutation --base origin/${{ github.base_ref }} .
+```
+
+### GitLab CI
+
+```yaml
+diffguard:
+  stage: test
+  script:
+    - go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
+    - diffguard --skip-mutation --base origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+```
+
+### Local pre-push hook
+
+```bash
+#!/bin/sh
+# .git/hooks/pre-push
+diffguard --skip-mutation --base develop .
+```
+
+## Example Output
+
+```
+=== Cognitive Complexity ===
+12 functions analyzed | Mean: 4.2 | Median: 3 | Max: 22 | 2 over threshold (10)  [FAIL]
+Violations:
+  pkg/handler/routes.go:45:HandleRequest                       complexity=22  [FAIL]
+  pkg/auth/token.go:112:ValidateToken                          complexity=14  [FAIL]
+
+=== Code Sizes ===
+12 functions, 3 files analyzed | 1 over threshold (func>50, file>500)  [FAIL]
+Violations:
+  pkg/handler/routes.go:45:HandleRequest                       function=87 lines  [FAIL]
+
+=== Dependency Structure ===
+3 packages analyzed | 0 cycles | 0 SDP violations  [PASS]
+
+=== Churn-Weighted Complexity ===
+12 functions analyzed | Top churn*complexity score: 440  [WARN]
+Warnings:
+  pkg/handler/routes.go:45:HandleRequest                       commits=20 complexity=22 score=440  [WARN]
+```
+
+## License
+
+MIT
