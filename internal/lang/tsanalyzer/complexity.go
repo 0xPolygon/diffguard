@@ -266,12 +266,18 @@ func conditionLogicalOps(cond *sitter.Node) int {
 // binary_expression tree, left-to-right. Non-logical binary ops stop the
 // recursion.
 //
+// Tree-sitter TypeScript wraps `if (cond)` conditions in a
+// `parenthesized_expression` (`( binary_expression )`). We strip that
+// wrapper when we first see it so a condition chain like
+// `if (a && b || c)` is traversed as the inner binary tree.
+//
 // Tree-sitter TypeScript models `a && b` as
 //
 //	(binary_expression left: ... operator: "&&" right: ...)
 //
 // — the operator is an anonymous child whose Type() is the operator token.
 func flattenLogicalOps(n *sitter.Node) []string {
+	n = unwrapParens(n)
 	if n == nil || n.Type() != "binary_expression" {
 		return nil
 	}
@@ -288,4 +294,18 @@ func flattenLogicalOps(n *sitter.Node) []string {
 	out = append(out, opText)
 	out = append(out, flattenLogicalOps(n.ChildByFieldName("right"))...)
 	return out
+}
+
+// unwrapParens strips a leading parenthesized_expression wrapper so
+// condition handling doesn't have to special-case the if/while grammar
+// shape. Returns n unchanged when no wrapping is present.
+func unwrapParens(n *sitter.Node) *sitter.Node {
+	for n != nil && n.Type() == "parenthesized_expression" {
+		// The inner expression is the first (and only) named child.
+		if n.NamedChildCount() == 0 {
+			return n
+		}
+		n = n.NamedChild(0)
+	}
+	return n
 }
