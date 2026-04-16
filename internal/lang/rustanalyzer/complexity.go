@@ -211,6 +211,17 @@ func countGuardedArms(match *sitter.Node) int {
 }
 
 // hasGuard reports whether a match_arm node carries an `if` guard.
+//
+// Two grammar shapes appear in practice:
+//
+//  1. Older grammars used a distinct `match_arm_guard` child.
+//  2. Current tree-sitter-rust models the guard as a `condition` field on
+//     the arm's `match_pattern` child — i.e.
+//     (match_arm pattern: (match_pattern (identifier)
+//                            condition: (binary_expression ...))
+//                 value: ...)
+//
+// We check for either to stay resilient across grammar updates.
 func hasGuard(arm *sitter.Node) bool {
 	for i := 0; i < int(arm.ChildCount()); i++ {
 		c := arm.Child(i)
@@ -218,6 +229,11 @@ func hasGuard(arm *sitter.Node) bool {
 			continue
 		}
 		if c.Type() == "match_arm_guard" {
+			return true
+		}
+	}
+	if pat := arm.ChildByFieldName("pattern"); pat != nil {
+		if pat.ChildByFieldName("condition") != nil {
 			return true
 		}
 	}
