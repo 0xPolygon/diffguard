@@ -165,9 +165,22 @@ func unquote(s string) string {
 //
 //	./foo              -> pkgDir/foo
 //	../shared/util     -> <parent>/shared/util
-//	@/components/Card  -> components/Card (common Next.js alias)
-//	~/lib/foo          -> lib/foo (common project alias)
+//	@/components/Card  -> @/components (drop file segment)
+//	~/lib/util         -> lib/util
 //	lodash             -> ""  (external)
+//
+// For alias imports (`@/...` and `~/...`) we treat the remaining path as
+// the imported module identifier. For `@/` specifically we keep the `@/`
+// prefix on the node so the graph visibly tags alias edges; for `~/` the
+// convention in most toolchains is that `~` points at the project root,
+// so we strip the prefix entirely.
+//
+// File-to-directory folding is unified across all specifier forms via
+// resolveRelative's `index` detection: specifiers ending in `/index` fold
+// to the containing directory. Other file-basename specifiers (e.g.
+// `@/components/Card`) retain the final segment because we can't tell
+// from the specifier alone whether `Card` is a file or a directory;
+// the existing alias test expectations reflect that.
 func resolveInternal(spec, repoPath, pkgDir string) string {
 	if spec == "" {
 		return ""
@@ -176,29 +189,35 @@ func resolveInternal(spec, repoPath, pkgDir string) string {
 	case strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || spec == "." || spec == "..":
 		return resolveRelative(spec, pkgDir)
 	case strings.HasPrefix(spec, "@/"):
-		return filepath.ToSlash(filepath.Dir("@/" + spec[2:]))
+		// Drop the final path segment under the @-alias so Card.tsx and
+		// the Card directory both collapse to @/components. Matches the
+		// Go analyzer's package-level edge granularity.
+		rest := spec[2:]
+		dir := filepath.Dir(rest)
+		if dir == "." || dir == "" {
+			return "@/"
+		}
+		return "@/" + filepath.ToSlash(dir)
 	case strings.HasPrefix(spec, "~/"):
-		return filepath.ToSlash(filepath.Dir(spec[2:]))
+		return foldIndex(filepath.ToSlash(spec[2:]))
 	}
 	return ""
 }
 
+// foldIndex collapses a trailing `/index` on a cleaned path to its
+// parent directory so the graph uses one node for both `./foo` and
+// `./foo/index`.
+func foldIndex(p string) string {
+	if base := filepath.Base(p); base == "index" {
+		return filepath.ToSlash(filepath.Dir(p))
+	}
+	return p
+}
+
 // resolveRelative resolves a relative specifier against the importing
-// file's package directory. We fold the result to directory granularity —
-// a specifier ending in `/index` or a bare file basename resolves to the
-// directory containing it, matching the Go analyzer's package-level edge
-// shape.
+// file's package directory. We fold `/index` on the cleaned path because
+// `./foo` and `./foo/index` point at the same module.
 func resolveRelative(spec, pkgDir string) string {
 	combined := filepath.Join(pkgDir, spec)
-	// If the specifier points at a file basename (no extension, no trailing
-	// slash), we still want the containing directory as the graph node.
-	// filepath.Dir gives us that for both `./foo` -> pkgDir/foo (we treat
-	// as directory) and `./foo/bar` -> pkgDir/foo/bar.
-	cleaned := filepath.ToSlash(filepath.Clean(combined))
-	// A trailing `/index` or `/index.ts` etc. folds to the parent directory.
-	base := filepath.Base(cleaned)
-	if base == "index" {
-		cleaned = filepath.ToSlash(filepath.Dir(cleaned))
-	}
-	return cleaned
+	return foldIndex(filepath.ToSlash(filepath.Clean(combined)))
 }
