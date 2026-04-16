@@ -46,11 +46,23 @@ func (t Tier) String() string {
 // operatorTier maps a mutation operator name (as set on Mutant.Operator) to
 // its tier. Unknown operators default to TierSemantic so a new operator
 // doesn't silently become report-only noise.
+//
+// Language-specific operators are listed alongside the canonical ones — the
+// tier reflects the signal quality of a surviving mutant, which is a
+// property of what the mutation encodes rather than which language it
+// targets. Rust's `unwrap_removal` and `some_to_none` strip error-handling
+// that well-tested code almost always exercises, so both sit in Tier 1
+// alongside negate_conditional. Rust's `question_mark_removal` also
+// disables error propagation but equivalent-mutant rate is higher (early
+// returns can be substituted by the caller's own match), so it lands in
+// Tier 2.
 func operatorTier(op string) Tier {
 	switch op {
-	case "negate_conditional", "conditional_boundary", "return_value", "math_operator":
+	case "negate_conditional", "conditional_boundary", "return_value", "math_operator",
+		"unwrap_removal", "some_to_none":
 		return TierLogic
-	case "boolean_substitution", "incdec":
+	case "boolean_substitution", "incdec",
+		"question_mark_removal":
 		return TierSemantic
 	case "statement_deletion", "branch_removal":
 		return TierObservability
