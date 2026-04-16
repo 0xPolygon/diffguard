@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -17,10 +21,9 @@ import (
 // analyzer pipeline → report build → exit code) without spawning a
 // subprocess.
 //
-// TODO: once Rust and TypeScript analyzers land, extend this test with
-// fixture files in the same temp repo and assert all three language
-// sections appear in the output. The current test only has the Go
-// analyzer registered, so multi-language section naming isn't exercised.
+// The cross-language E1 integration test lives below in
+// TestMixedRepo_* — those build the binary and run it as a subprocess
+// against the three-language fixture in testdata/mixed-repo/.
 func TestRun_SingleLanguageGo(t *testing.T) {
 	repo := initTempGoRepo(t)
 
@@ -218,4 +221,214 @@ func TestCheckExitCode_FailInAnyLanguageEscalates(t *testing.T) {
 	if err := checkExitCode(allPass, "warn"); err != nil {
 		t.Errorf("all-PASS should not error, got %v", err)
 	}
+}
+
+// --- E1: mixed-repo end-to-end ---
+//
+// These tests build the diffguard binary via `go build` and exec it against
+// the fixture at cmd/diffguard/testdata/mixed-repo/. The fixture has two
+// variants: `violations/` with functions that trip the complexity threshold
+// in every language, and `clean/` with trivial functions. The tests run in
+// refactoring mode (--paths .) and --skip-mutation so they stay fast and
+// don't require cargo / node / tests on $PATH.
+
+// TestMixedRepo_ViolationsHasAllThreeLanguageSections asserts the positive
+// variant produces a section for each registered language with the [lang]
+// suffix, and that the overall verdict is FAIL (the seeded complexity
+// violations are across every language).
+func TestMixedRepo_ViolationsHasAllThreeLanguageSections(t *testing.T) {
+	binary := buildDiffguardBinary(t)
+	repo := copyFixture(t, "testdata/mixed-repo/violations")
+
+	rpt := runBinaryJSON(t, binary, repo, []string{
+		"--paths", ".",
+		"--skip-mutation",
+		"--fail-on", "none",
+		"--output", "json",
+	})
+
+	// Expect at least one section per language, suffixed by [lang]. We
+	// don't pin exact section counts because future analyzers may add
+	// more, but [go]/[rust]/[typescript] must all appear.
+	wantSuffixes := []string{"[go]", "[rust]", "[typescript]"}
+	for _, suf := range wantSuffixes {
+		if !anySectionHasSuffix(rpt, suf) {
+			t.Errorf("expected at least one section with suffix %s; got sections: %v",
+				suf, sectionNames(rpt))
+		}
+	}
+
+	// Complexity per-language must be FAIL in the violations fixture.
+	for _, lang := range []string{"go", "rust", "typescript"} {
+		sec := findSectionBySuffix(rpt, "Cognitive Complexity", lang)
+		if sec == nil {
+			t.Errorf("missing Cognitive Complexity [%s] section", lang)
+			continue
+		}
+		if sec.Severity != report.SeverityFail {
+			t.Errorf("Cognitive Complexity [%s] severity = %q, want FAIL",
+				lang, sec.Severity)
+		}
+	}
+
+	if rpt.WorstSeverity() != report.SeverityFail {
+		t.Errorf("WorstSeverity = %q, want FAIL", rpt.WorstSeverity())
+	}
+}
+
+// TestMixedRepo_CleanAllPass asserts the negative control (no violations)
+// produces PASS across all language sections.
+func TestMixedRepo_CleanAllPass(t *testing.T) {
+	binary := buildDiffguardBinary(t)
+	repo := copyFixture(t, "testdata/mixed-repo/clean")
+
+	rpt := runBinaryJSON(t, binary, repo, []string{
+		"--paths", ".",
+		"--skip-mutation",
+		"--fail-on", "none",
+		"--output", "json",
+	})
+
+	for _, suf := range []string{"[go]", "[rust]", "[typescript]"} {
+		if !anySectionHasSuffix(rpt, suf) {
+			t.Errorf("expected at least one section with suffix %s; got sections: %v",
+				suf, sectionNames(rpt))
+		}
+	}
+
+	if rpt.WorstSeverity() != report.SeverityPass {
+		// Dump section severities for diagnostics.
+		for _, s := range rpt.Sections {
+			t.Logf("  %s -> %s", s.Name, s.Severity)
+		}
+		t.Errorf("WorstSeverity = %q, want PASS", rpt.WorstSeverity())
+	}
+}
+
+// --- Helpers used by the mixed-repo tests ---
+
+// buildDiffguardBinary builds the CLI to a temp dir and returns the path.
+// The test's t.Cleanup removes the dir so no build artifacts pollute the
+// source tree.
+func buildDiffguardBinary(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "diffguard")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", bin, ".")
+	// Build from the package dir so `.` resolves correctly.
+	cmd.Dir = packageDir(t)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// packageDir returns the directory containing the current test binary's
+// package source. Works for both `go test ./cmd/diffguard` and `go test ./...`.
+func packageDir(t *testing.T) string {
+	t.Helper()
+	// The test runs with cwd == the package directory by default.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
+}
+
+// copyFixture copies a testdata subdir into an isolated temp dir. Tests
+// must never mutate the source tree, and some analyzers (churn) call git
+// inside repoPath; a fresh copy keeps both concerns clean.
+func copyFixture(t *testing.T, relDir string) string {
+	t.Helper()
+	src := filepath.Join(packageDir(t), relDir)
+	dst := t.TempDir()
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.Create(target)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		_, err = io.Copy(out, in)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("copying fixture %s: %v", relDir, err)
+	}
+	return dst
+}
+
+// runBinaryJSON executes the binary against the repo dir and decodes the
+// JSON report from stdout. Stderr is streamed to the test log for debug
+// visibility. Non-zero exit is tolerated (caller controls --fail-on) as
+// long as stdout parses.
+func runBinaryJSON(t *testing.T, binary, repo string, args []string) report.Report {
+	t.Helper()
+	full := append([]string{}, args...)
+	full = append(full, repo)
+	cmd := exec.Command(binary, full...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if stderr.Len() > 0 {
+		t.Logf("diffguard stderr:\n%s", stderr.String())
+	}
+	// Only a genuine run failure (e.g. can't find the repo) is a problem
+	// here. An exit=1 due to FAIL is expected in the violations test and
+	// we opt out via --fail-on=none anyway.
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			t.Logf("diffguard exited with %d (ok for --fail-on=none runs)", exitErr.ExitCode())
+		}
+	}
+	var rpt report.Report
+	if err := json.Unmarshal(stdout.Bytes(), &rpt); err != nil {
+		t.Fatalf("unmarshal report: %v\nstdout was:\n%s", err, stdout.String())
+	}
+	return rpt
+}
+
+func anySectionHasSuffix(r report.Report, suffix string) bool {
+	for _, s := range r.Sections {
+		if strings.HasSuffix(s.Name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func sectionNames(r report.Report) []string {
+	out := make([]string, len(r.Sections))
+	for i, s := range r.Sections {
+		out[i] = s.Name
+	}
+	return out
+}
+
+// findSectionBySuffix finds the section whose name is "<metricPrefix> [lang]".
+func findSectionBySuffix(r report.Report, metricPrefix, langName string) *report.Section {
+	want := metricPrefix + " [" + langName + "]"
+	for i := range r.Sections {
+		if r.Sections[i].Name == want {
+			return &r.Sections[i]
+		}
+	}
+	return nil
 }
