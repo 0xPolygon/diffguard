@@ -121,11 +121,15 @@ func walkComplexity(n *sitter.Node, src []byte, nesting int) int {
 		// Older grammar versions model `if let` as a distinct node; current
 		// versions fold it into if_expression with a `let_condition` child.
 		// We cover both so the walker is resilient across grammar updates.
+		// The scrutinee (what follows `=` in `if let P = value`) lives in
+		// the `value` field and may itself be a `&&`/`||` chain.
 		total += 1 + nesting
+		total += conditionLogicalOps(n.ChildByFieldName("value"))
 		total += walkChildrenWithNesting(n, src, nesting)
 		return total
 	case "while_let_expression":
 		total += 1 + nesting
+		total += conditionLogicalOps(n.ChildByFieldName("value"))
 		total += walkChildrenWithNesting(n, src, nesting)
 		return total
 	case "closure_expression":

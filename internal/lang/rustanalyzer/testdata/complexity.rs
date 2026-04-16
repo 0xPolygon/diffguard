@@ -45,6 +45,17 @@ fn logical(a: bool, b: bool, c: bool) -> bool {
     }
 }
 
+
+// Simple if let — grammar emits if_expression+let_condition (current) or
+// if_let_expression (older).  Either way: +1 base, 0 logical ops. Total = 1.
+fn if_let_simple(foo: Option<i32>) -> i32 {
+    if let Some(x) = foo {
+        x
+    } else {
+        0
+    }
+}
+
 // unsafe block should NOT count; `?` should NOT count. This fn has:
 // one if = +1, one ? = +0, one unsafe = +0. Total = 1.
 fn unsafe_and_try(maybe: Option<i32>) -> Result<i32, ()> {
