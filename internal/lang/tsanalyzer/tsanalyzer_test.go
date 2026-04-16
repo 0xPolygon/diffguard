@@ -1,7 +1,6 @@
 package tsanalyzer
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -91,8 +90,12 @@ func TestFileFilterIncludesSource(t *testing.T) {
 // does NOT match. This is the behavior promised by the design doc.
 func TestDetector_TSRepoMatches(t *testing.T) {
 	root := t.TempDir()
-	writeFile(filepath.Join(root, "package.json"), []byte(`{"name":"demo"}`))
-	writeFile(filepath.Join(root, "src", "app.ts"), []byte(`export const x = 1;`))
+	if err := writeFile(filepath.Join(root, "package.json"), []byte(`{"name":"demo"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(root, "src", "app.ts"), []byte(`export const x = 1;`)); err != nil {
+		t.Fatal(err)
+	}
 
 	langs := lang.Detect(root)
 	got := map[string]bool{}
@@ -106,8 +109,12 @@ func TestDetector_TSRepoMatches(t *testing.T) {
 
 func TestDetector_JSOnlyRepoDoesNotMatch(t *testing.T) {
 	root := t.TempDir()
-	writeFile(filepath.Join(root, "package.json"), []byte(`{"name":"demo"}`))
-	writeFile(filepath.Join(root, "src", "app.js"), []byte(`module.exports = {};`))
+	if err := writeFile(filepath.Join(root, "package.json"), []byte(`{"name":"demo"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(root, "src", "app.js"), []byte(`module.exports = {};`)); err != nil {
+		t.Fatal(err)
+	}
 
 	langs := lang.Detect(root)
 	for _, l := range langs {
@@ -128,7 +135,9 @@ func TestDetector_JSOnlyRepoDoesNotMatch(t *testing.T) {
 // package.json isn't a TS project we care about (not a node package).
 func TestDetector_NoPackageJSONDoesNotMatch(t *testing.T) {
 	root := t.TempDir()
-	writeFile(filepath.Join(root, "src", "app.ts"), []byte(`export const x = 1;`))
+	if err := writeFile(filepath.Join(root, "src", "app.ts"), []byte(`export const x = 1;`)); err != nil {
+		t.Fatal(err)
+	}
 
 	langs := lang.Detect(root)
 	for _, l := range langs {
@@ -143,17 +152,16 @@ func TestDetector_NoPackageJSONDoesNotMatch(t *testing.T) {
 // any node project and wouldn't indicate the repo itself is TypeScript.
 func TestDetector_IgnoresNodeModules(t *testing.T) {
 	root := t.TempDir()
-	writeFile(filepath.Join(root, "package.json"), []byte(`{"name":"demo"}`))
+	if err := writeFile(filepath.Join(root, "package.json"), []byte(`{"name":"demo"}`)); err != nil {
+		t.Fatal(err)
+	}
 	// Only a .ts file under node_modules — hasTSFile must skip it.
-	writeFile(filepath.Join(root, "node_modules", "pkg", "lib.ts"), []byte(`export const x = 1;`))
+	if err := writeFile(filepath.Join(root, "node_modules", "pkg", "lib.ts"), []byte(`export const x = 1;`)); err != nil {
+		t.Fatal(err)
+	}
 
 	if hasTSFile(root) {
 		t.Error("hasTSFile should skip node_modules and return false for JS-only repo layout")
 	}
 }
 
-// writeFile is the package-local test helper mirroring the Rust analyzer.
-func writeFile(path string, data []byte) {
-	_ = os.MkdirAll(filepath.Dir(path), 0755)
-	_ = os.WriteFile(path, data, 0644)
-}
