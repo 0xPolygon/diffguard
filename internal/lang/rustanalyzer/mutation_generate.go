@@ -168,11 +168,10 @@ func boolMutants(file string, line int, n *sitter.Node, src []byte) []lang.Mutan
 // construction, not only those that appear directly in a return.
 func returnMutants(file string, line int, n *sitter.Node, _ []byte) []lang.MutantSite {
 	// A return_expression has at most one named child — the returned value.
-	var value *sitter.Node
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		value = n.NamedChild(i)
-		break
+	if n.NamedChildCount() == 0 {
+		return nil
 	}
+	value := n.NamedChild(0)
 	if value == nil {
 		return nil
 	}
@@ -230,15 +229,10 @@ func ifMutants(file string, line int, n *sitter.Node, _ []byte) []lang.MutantSit
 // statements (assignments, let bindings) are left alone because deleting
 // them tends to produce un-killable dead-code mutants.
 func exprStmtMutants(file string, line int, n *sitter.Node, _ []byte) []lang.MutantSite {
-	var payload *sitter.Node
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		c := n.NamedChild(i)
-		if c == nil {
-			continue
-		}
-		payload = c
-		break
+	if n.NamedChildCount() == 0 {
+		return nil
 	}
+	payload := n.NamedChild(0)
 	if payload == nil || payload.Type() != "call_expression" {
 		return nil
 	}

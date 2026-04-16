@@ -172,11 +172,10 @@ func applyReturnValue(root *sitter.Node, src []byte, site lang.MutantSite) []byt
 	if ret == nil {
 		return nil
 	}
-	var value *sitter.Node
-	for i := 0; i < int(ret.NamedChildCount()); i++ {
-		value = ret.NamedChild(i)
-		break
+	if ret.NamedChildCount() == 0 {
+		return nil
 	}
+	value := ret.NamedChild(0)
 	if value == nil {
 		return nil
 	}
@@ -293,11 +292,10 @@ func applyQuestionMarkRemoval(root *sitter.Node, src []byte, site lang.MutantSit
 		return nil
 	}
 	// The inner expression is the first (and only) named child.
-	var inner *sitter.Node
-	for i := 0; i < int(try.NamedChildCount()); i++ {
-		inner = try.NamedChild(i)
-		break
+	if try.NamedChildCount() == 0 {
+		return nil
 	}
+	inner := try.NamedChild(0)
 	if inner == nil {
 		return nil
 	}
