@@ -244,6 +244,39 @@ func TestApply_OptionalChainRemoval(t *testing.T) {
 	}
 }
 
+// TestApply_BranchRemoval_BareForm ensures the applier handles an if-statement
+// whose consequence is a single statement without braces (bare form). The
+// mutated output must replace that statement with an empty block `{}` so the
+// result still parses cleanly as valid TypeScript.
+func TestApply_BranchRemoval_BareForm(t *testing.T) {
+	src := `function doThing(): void {}
+function f(x: boolean): void {
+    if (x) doThing();
+}
+`
+	site := lang.MutantSite{
+		File:        "a.ts",
+		Line:        3,
+		Operator:    "branch_removal",
+		Description: "remove if body",
+	}
+	out := applyAt(t, src, site)
+	if out == nil {
+		t.Fatal("applier returned nil for bare-form if body")
+	}
+	s := string(out)
+	// The bare `doThing();` must be gone — replaced by `{}`.
+	if strings.Contains(s, "doThing();") {
+		t.Errorf("bare if body not removed, got:\n%s", s)
+	}
+	// The if structure itself must remain parseable — confirmed by the
+	// isValidTS gate inside ApplyMutation, but we also sanity-check the
+	// output contains `if (x)`.
+	if !strings.Contains(s, "if (x)") {
+		t.Errorf("if condition not preserved, got:\n%s", s)
+	}
+}
+
 func TestApply_UnknownOperatorReturnsNil(t *testing.T) {
 	src := `function f(): void {}
 `
