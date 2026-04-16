@@ -99,10 +99,10 @@ func f() {
 	}
 }
 
-func TestComplexityAndScorer_Agree(t *testing.T) {
-	// ComplexityScorer.ScoreFile currently delegates to AnalyzeFile, so the
-	// per-function scores must match exactly. This is the invariant the
-	// churn analyzer relies on.
+// TestScorer_SimpleCounter locks in the ScoreFile behavior: it's the
+// simpler "bump by 1 per branch" counter, not the full cognitive walker.
+// Two nested if statements score 2 (not 3 — no nesting penalty).
+func TestScorer_SimpleCounter(t *testing.T) {
 	code := `package p
 func f(x int) {
 	if x > 0 {
@@ -118,15 +118,18 @@ func f(x int) {
 		Regions: []diff.ChangedRegion{{StartLine: 1, EndLine: 100}},
 	}
 
-	analyze, _ := complexityImpl{}.AnalyzeFile(fp, fc)
 	score, _ := complexityImpl{}.ScoreFile(fp, fc)
-	if len(analyze) != len(score) {
-		t.Fatalf("len mismatch: %d vs %d", len(analyze), len(score))
+	if len(score) != 1 {
+		t.Fatalf("len(score) = %d, want 1", len(score))
 	}
-	for i := range analyze {
-		if analyze[i].Complexity != score[i].Complexity {
-			t.Errorf("[%d] complexity mismatch: %d vs %d", i, analyze[i].Complexity, score[i].Complexity)
-		}
+	if score[0].Complexity != 2 {
+		t.Errorf("score = %d, want 2 (+1 per if, no nesting)", score[0].Complexity)
+	}
+
+	// The full calculator gives the same code a higher score due to nesting.
+	analyze, _ := complexityImpl{}.AnalyzeFile(fp, fc)
+	if analyze[0].Complexity != 3 {
+		t.Errorf("AnalyzeFile = %d, want 3 (cognitive with nesting)", analyze[0].Complexity)
 	}
 }
 

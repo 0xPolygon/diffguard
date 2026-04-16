@@ -49,11 +49,70 @@ func (complexityImpl) AnalyzeFile(absPath string, fc diff.FileChange) ([]lang.Fu
 	return results, nil
 }
 
-// ScoreFile is the ComplexityScorer entry point. Churn weighting only needs
-// a number; reusing the full cognitive calculation keeps scores consistent
-// between the complexity section and the churn-weighting it feeds into.
+// ScoreFile is the ComplexityScorer entry point used by the churn analyzer.
+// It deliberately uses a simplified counter (bump by 1 for each if/for/
+// switch/select/logical-op node) rather than the full cognitive complexity
+// walker, matching the pre-split churn.computeComplexity. The churn score
+// only needs a relative ordering of "hotter" functions; a coarse counter is
+// faster to compute and keeps the churn output byte-identical to the
+// pre-refactor numbers.
 func (complexityImpl) ScoreFile(absPath string, fc diff.FileChange) ([]lang.FunctionComplexity, error) {
-	return complexityImpl{}.AnalyzeFile(absPath, fc)
+	fset, f, err := parseFile(absPath, 0)
+	if err != nil {
+		return nil, nil
+	}
+
+	var results []lang.FunctionComplexity
+	ast.Inspect(f, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok {
+			return true
+		}
+		startLine := fset.Position(fn.Pos()).Line
+		endLine := fset.Position(fn.End()).Line
+		if !fc.OverlapsRange(startLine, endLine) {
+			return false
+		}
+		results = append(results, lang.FunctionComplexity{
+			FunctionInfo: lang.FunctionInfo{
+				File:    fc.Path,
+				Line:    startLine,
+				EndLine: endLine,
+				Name:    funcName(fn),
+			},
+			Complexity: computeSimpleComplexity(fn.Body),
+		})
+		return false
+	})
+	return results, nil
+}
+
+// computeSimpleComplexity is the simplified counter used by the churn
+// analyzer: +1 per branching construct, +1 per && / || operator. No
+// nesting penalty and no operator-change accounting. Matches the
+// pre-split internal/churn.computeComplexity so churn scores stay
+// byte-identical.
+func computeSimpleComplexity(body *ast.BlockStmt) int {
+	if body == nil {
+		return 0
+	}
+	count := 0
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.IfStmt:
+			count++
+		case *ast.ForStmt, *ast.RangeStmt:
+			count++
+		case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+			count++
+		case *ast.BinaryExpr:
+			if v.Op == token.LAND || v.Op == token.LOR {
+				count++
+			}
+		}
+		return true
+	})
+	return count
 }
 
 // computeCognitiveComplexity is the exact algorithm that lived in
