@@ -8,7 +8,7 @@ A targeted code quality gate for Go, Rust, and TypeScript repositories. Analyzes
 |------------|-------------------------|------------------|----------------------------------|
 | Go         | `.go`                   | `go.mod`         | `go test` (with `-overlay` isolation) |
 | Rust       | `.rs`                   | `Cargo.toml`     | `cargo test` (temp-copy isolation) |
-| TypeScript | `.ts`, `.tsx`, `.mts`, `.cts` | `package.json` | `npm test` (project-configured — vitest / jest / node) |
+| TypeScript | `.ts`, `.tsx` | `package.json` | `npm test` (project-configured — vitest / jest / node) |
 
 Languages are auto-detected from root-level manifest files; pass `--language go,rust,typescript` (comma-separated) to force a subset. See [`MULTI_LANGUAGE_SUPPORT.md`](MULTI_LANGUAGE_SUPPORT.md) for the architectural overview and [`docs/rust-typescript-support.md`](docs/rust-typescript-support.md) for the Rust+TS roadmap and parser details.
 
