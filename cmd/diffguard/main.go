@@ -97,7 +97,7 @@ func run(repoPath string, cfg Config) error {
 
 	announceRun(d, cfg)
 
-	sections, err := runAnalyses(repoPath, d, cfg)
+	sections, err := runAnalyses(repoPath, d, cfg, goLang)
 	if err != nil {
 		return err
 	}
@@ -117,35 +117,35 @@ func announceRun(d *diff.Result, cfg Config) {
 	}
 }
 
-func runAnalyses(repoPath string, d *diff.Result, cfg Config) ([]report.Section, error) {
+func runAnalyses(repoPath string, d *diff.Result, cfg Config, l lang.Language) ([]report.Section, error) {
 	var sections []report.Section
 
-	complexitySection, err := complexity.Analyze(repoPath, d, cfg.ComplexityThreshold)
+	complexitySection, err := complexity.Analyze(repoPath, d, cfg.ComplexityThreshold, l.ComplexityCalculator())
 	if err != nil {
 		return nil, fmt.Errorf("complexity analysis: %w", err)
 	}
 	sections = append(sections, complexitySection)
 
-	sizesSection, err := sizes.Analyze(repoPath, d, cfg.FunctionSizeThreshold, cfg.FileSizeThreshold)
+	sizesSection, err := sizes.Analyze(repoPath, d, cfg.FunctionSizeThreshold, cfg.FileSizeThreshold, l.FunctionExtractor())
 	if err != nil {
 		return nil, fmt.Errorf("size analysis: %w", err)
 	}
 	sections = append(sections, sizesSection)
 
-	depsSection, err := deps.Analyze(repoPath, d)
+	depsSection, err := deps.Analyze(repoPath, d, l.ImportResolver())
 	if err != nil {
 		return nil, fmt.Errorf("dependency analysis: %w", err)
 	}
 	sections = append(sections, depsSection)
 
-	churnSection, err := churn.Analyze(repoPath, d, cfg.ComplexityThreshold)
+	churnSection, err := churn.Analyze(repoPath, d, cfg.ComplexityThreshold, l.ComplexityScorer())
 	if err != nil {
 		return nil, fmt.Errorf("churn analysis: %w", err)
 	}
 	sections = append(sections, churnSection)
 
 	if !cfg.SkipMutation {
-		mutationSection, err := mutation.Analyze(repoPath, d, mutation.Options{
+		mutationSection, err := mutation.Analyze(repoPath, d, l, mutation.Options{
 			SampleRate:     cfg.MutationSampleRate,
 			TestTimeout:    cfg.TestTimeout,
 			TestPattern:    cfg.TestPattern,

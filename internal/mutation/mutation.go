@@ -1,12 +1,15 @@
+// Package mutation orchestrates mutation testing across a diff's changed
+// files. The AST-level work (generating mutants, applying them, scanning
+// annotations, running tests) is provided by the language back-end via
+// lang.MutantGenerator / lang.MutantApplier / lang.AnnotationScanner /
+// lang.TestRunner. This package owns the scheduling, tiering, and report
+// formatting — pieces that don't depend on any particular language.
 package mutation
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/0xPolygon/diffguard/internal/diff"
+	"github.com/0xPolygon/diffguard/internal/lang"
 	"github.com/0xPolygon/diffguard/internal/report"
 )
 
@@ -31,33 +35,34 @@ type Mutant struct {
 type Options struct {
 	// SampleRate is the percentage (0-100) of generated mutants to actually test.
 	SampleRate float64
-	// TestTimeout is the per-mutant timeout passed to `go test -timeout`.
+	// TestTimeout is the per-mutant timeout.
 	// Zero means use the default (30s).
 	TestTimeout time.Duration
-	// TestPattern, if non-empty, is passed to `go test -run` to scope tests.
+	// TestPattern, if non-empty, is passed to the language's test runner to
+	// scope tests.
 	TestPattern string
 	// Tier1Threshold is the minimum killed-percentage for Tier 1 operators
-	// (logic mutations) below which the section is reported as FAIL. Zero
-	// falls back to defaultTier1Threshold.
+	// below which the section is reported as FAIL. Zero falls back to
+	// defaultTier1Threshold.
 	Tier1Threshold float64
 	// Tier2Threshold is the minimum killed-percentage for Tier 2 operators
-	// (semantic mutations) below which the section is reported as WARN. Zero
-	// falls back to defaultTier2Threshold.
+	// below which the section is reported as WARN. Zero falls back to
+	// defaultTier2Threshold.
 	Tier2Threshold float64
-	// Workers caps the number of packages processed concurrently. Zero or
-	// negative means use runtime.NumCPU(). Mutants within a single package
-	// always run sequentially regardless of this setting.
+	// Workers caps the number of mutants processed concurrently. Zero or
+	// negative means use runtime.NumCPU().
 	Workers int
 }
 
 const (
 	defaultTier1Threshold = 90.0
 	defaultTier2Threshold = 70.0
+	defaultTestTimeout    = 30 * time.Second
 )
 
 func (o Options) timeout() time.Duration {
 	if o.TestTimeout <= 0 {
-		return 30 * time.Second
+		return defaultTestTimeout
 	}
 	return o.TestTimeout
 }
@@ -83,14 +88,16 @@ func (o Options) workers() int {
 	return o.Workers
 }
 
-// Analyze applies mutation operators to changed code and runs tests.
+// Analyze applies mutation operators to changed code (via the language's
+// MutantGenerator/Applier) and runs the language's TestRunner against each
+// mutant.
 //
-// Each mutant is tested in isolation using `go test -overlay` so mutants
-// never touch the real source files on disk. This means mutants can be
-// fully parallelized — including mutants on the same file or package —
-// up to opts.workers() concurrent go test invocations.
-func Analyze(repoPath string, d *diff.Result, opts Options) (report.Section, error) {
-	allMutants := collectMutants(repoPath, d)
+// Parallelism is controlled by Options.Workers; concurrency safety is the
+// TestRunner's responsibility (Go's overlay-based runner is safe to call
+// concurrently; temp-copy runners for other languages must serialize
+// per-file internally).
+func Analyze(repoPath string, d *diff.Result, l lang.Language, opts Options) (report.Section, error) {
+	allMutants := collectMutants(repoPath, d, l)
 
 	if len(allMutants) == 0 {
 		return report.Section{
@@ -110,27 +117,49 @@ func Analyze(repoPath string, d *diff.Result, opts Options) (report.Section, err
 	}
 	defer os.RemoveAll(workDir)
 
-	killed := runMutantsParallel(repoPath, allMutants, opts, workDir)
+	killed := runMutantsParallel(repoPath, allMutants, l, opts, workDir)
 	return buildSection(allMutants, killed, opts), nil
 }
 
-func collectMutants(repoPath string, d *diff.Result) []Mutant {
+// collectMutants gathers mutation sites for every changed file, honoring
+// the language's annotation scanner so lines marked
+// `// mutator-disable-*` never produce mutants.
+func collectMutants(repoPath string, d *diff.Result, l lang.Language) []Mutant {
+	gen := l.MutantGenerator()
+	scanner := l.AnnotationScanner()
+
 	var all []Mutant
 	for _, fc := range d.Files {
 		absPath := filepath.Join(repoPath, fc.Path)
-		mutants, err := generateMutants(absPath, fc)
+		disabled, err := scanner.ScanAnnotations(absPath)
 		if err != nil {
 			continue
 		}
-		all = append(all, mutants...)
+		sites, err := gen.GenerateMutants(absPath, fc, disabled)
+		if err != nil {
+			continue
+		}
+		for _, s := range sites {
+			all = append(all, Mutant{
+				File:        s.File,
+				Line:        s.Line,
+				Description: s.Description,
+				Operator:    s.Operator,
+			})
+		}
 	}
 	return all
 }
 
-// runMutantsParallel processes mutants fully in parallel (including mutants
-// on the same file) up to opts.workers() concurrent workers. Isolation
-// between mutants is provided by `go test -overlay`, not by serialization.
-func runMutantsParallel(repoPath string, mutants []Mutant, opts Options, workDir string) int {
+// runMutantsParallel processes mutants concurrently up to opts.workers().
+// Each mutant goes through ApplyMutation -> TestRunner.RunTest; the
+// TestRunner implementation is responsible for isolating concurrent
+// invocations (the Go runner uses `go test -overlay`; non-Go runners use
+// per-file temp-copy + mutex).
+func runMutantsParallel(repoPath string, mutants []Mutant, l lang.Language, opts Options, workDir string) int {
+	applier := l.MutantApplier()
+	runner := l.TestRunner()
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, opts.workers())
 
@@ -140,7 +169,7 @@ func runMutantsParallel(repoPath string, mutants []Mutant, opts Options, workDir
 		go func(idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			mutants[idx].Killed = runMutant(repoPath, &mutants[idx], opts, workDir, idx)
+			mutants[idx].Killed = runMutant(repoPath, &mutants[idx], applier, runner, opts, workDir, idx)
 		}(i)
 	}
 	wg.Wait()
@@ -154,63 +183,43 @@ func runMutantsParallel(repoPath string, mutants []Mutant, opts Options, workDir
 	return killed
 }
 
-// runMutant applies a mutation to a temp file, uses go test -overlay to
-// have the test compile against the temp file (leaving the real source
-// untouched), and returns whether any test failed.
-func runMutant(repoPath string, m *Mutant, opts Options, workDir string, idx int) bool {
+// runMutant applies the mutation, writes the mutated source to a temp file
+// inside workDir, and hands it to the language's TestRunner. The runner
+// returns (killed, output, err); on runner error we skip the mutant.
+func runMutant(repoPath string, m *Mutant, applier lang.MutantApplier, runner lang.TestRunner, opts Options, workDir string, idx int) bool {
 	absPath := filepath.Join(repoPath, m.File)
 
-	mutated := applyMutation(absPath, m)
-	if mutated == nil {
+	mutated, err := applier.ApplyMutation(absPath, lang.MutantSite{
+		File:        m.File,
+		Line:        m.Line,
+		Description: m.Description,
+		Operator:    m.Operator,
+	})
+	if err != nil || mutated == nil {
 		return false
 	}
 
-	mutantFile := filepath.Join(workDir, fmt.Sprintf("m%d.go", idx))
+	mutantFile := filepath.Join(workDir, fmt.Sprintf("m%d%s", idx, filepath.Ext(absPath)))
 	if err := os.WriteFile(mutantFile, mutated, 0644); err != nil {
 		return false
 	}
 
-	overlayPath := filepath.Join(workDir, fmt.Sprintf("m%d-overlay.json", idx))
-	if err := writeOverlayJSON(overlayPath, absPath, mutantFile); err != nil {
+	killed, output, err := runner.RunTest(lang.TestRunConfig{
+		RepoPath:     repoPath,
+		MutantFile:   mutantFile,
+		OriginalFile: absPath,
+		Timeout:      opts.timeout(),
+		TestPattern:  opts.TestPattern,
+		WorkDir:      workDir,
+		Index:        idx,
+	})
+	if err != nil {
 		return false
 	}
-
-	pkgDir := filepath.Dir(absPath)
-	cmd := exec.Command("go", buildTestArgs(opts, overlayPath)...)
-	cmd.Dir = pkgDir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-
-	if err != nil {
-		m.TestOutput = stderr.String()
-		return true
+	if killed {
+		m.TestOutput = output
 	}
-	return false
-}
-
-// writeOverlayJSON writes a go build overlay file mapping originalPath to
-// mutantPath. See `go help build` -overlay flag for format details.
-func writeOverlayJSON(path, originalPath, mutantPath string) error {
-	overlay := struct {
-		Replace map[string]string `json:"Replace"`
-	}{
-		Replace: map[string]string{originalPath: mutantPath},
-	}
-	data, err := json.Marshal(overlay)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
-
-func buildTestArgs(opts Options, overlayPath string) []string {
-	args := []string{"test", "-overlay=" + overlayPath, "-count=1", "-timeout", opts.timeout().String()}
-	if opts.TestPattern != "" {
-		args = append(args, "-run", opts.TestPattern)
-	}
-	args = append(args, "./...")
-	return args
+	return killed
 }
 
 func sampleMutants(mutants []Mutant, rate float64) []Mutant {
