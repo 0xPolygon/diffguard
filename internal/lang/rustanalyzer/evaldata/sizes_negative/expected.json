@@ -1,0 +1,10 @@
+{
+  "worst_severity": "PASS",
+  "sections": [
+    {
+      "name": "Code Sizes",
+      "severity": "PASS",
+      "must_not_have_findings": true
+    }
+  ]
+}
