@@ -124,13 +124,25 @@ func buildRustFunction(n *sitter.Node, src []byte) *rustFunction {
 	}
 }
 
-// enclosingImplType walks up parents looking for an impl_item and returns
-// its "type" field's text (the `Type` in `impl Type { ... }` or
-// `impl Trait for Type { ... }`). Returns "" if the function is not inside
-// an impl block.
+// enclosingImplType walks up parents looking for the closest enclosing
+// impl_item and returns its "type" field's text (the `Type` in
+// `impl Type { ... }` or `impl Trait for Type { ... }`). If we encounter
+// a function_item or closure_expression first, the candidate function is
+// nested inside another function and should not inherit an impl prefix —
+// it stays a bare standalone name.
+//
+// Tree-sitter Rust uses the "type" field name for `impl Type` and
+// `impl Trait for Type` alike (the trait, when present, lives under the
+// "trait" field), so the same lookup works for both forms.
 func enclosingImplType(n *sitter.Node, src []byte) string {
 	for parent := n.Parent(); parent != nil; parent = parent.Parent() {
-		if parent.Type() == "impl_item" {
+		switch parent.Type() {
+		case "function_item", "closure_expression":
+			// Reached a nesting boundary before any impl — the function
+			// is defined inside another function's body and should not
+			// carry the outer impl's type prefix.
+			return ""
+		case "impl_item":
 			typeNode := parent.ChildByFieldName("type")
 			if typeNode == nil {
 				return ""
