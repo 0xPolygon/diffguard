@@ -116,7 +116,7 @@ func Parse(repoPath, baseBranch string, filter Filter) (*Result, error) {
 	}
 	mergeBase := strings.TrimSpace(string(mergeBaseOut))
 
-	args := []string{"diff", "-U0", mergeBase}
+	args := []string{"diff", "--src-prefix=a/", "--dst-prefix=b/", "-U0", mergeBase}
 	if len(filter.DiffGlobs) > 0 {
 		args = append(args, "--")
 		args = append(args, filter.DiffGlobs...)
