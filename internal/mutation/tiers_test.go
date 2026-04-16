@@ -29,6 +29,15 @@ func TestOperatorTier(t *testing.T) {
 		{"unwrap_removal", TierLogic},
 		{"some_to_none", TierLogic},
 		{"question_mark_removal", TierSemantic},
+		// TypeScript-specific: strict_equality toggles === vs == — when a
+		// surviving mutant doesn't get caught the test suite almost certainly
+		// isn't exercising strict-comparison semantics, so Tier 1.
+		// nullish_to_logical_or and optional_chain_removal have higher
+		// equivalent-mutant rates because code that never encounters nullish
+		// inputs won't distinguish the mutated form, so they're Tier 2.
+		{"strict_equality", TierLogic},
+		{"nullish_to_logical_or", TierSemantic},
+		{"optional_chain_removal", TierSemantic},
 		// Unknown defaults to TierSemantic so new operators don't silently
 		// land in the noise-prone tier.
 		{"unknown_operator", TierSemantic},

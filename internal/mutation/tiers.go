@@ -56,13 +56,23 @@ func (t Tier) String() string {
 // disables error propagation but equivalent-mutant rate is higher (early
 // returns can be substituted by the caller's own match), so it lands in
 // Tier 2.
+//
+// TypeScript's `strict_equality` (toggling `===` vs `==`) almost always
+// exposes a real semantic gap when it survives — tests that don't
+// distinguish strict from loose equality are usually broken — so it sits
+// in Tier 1 alongside negate_conditional. `nullish_to_logical_or` (`??`
+// to `||`) and `optional_chain_removal` (`foo?.bar` to `foo.bar`) land in
+// Tier 2: both have meaningful equivalent-mutant cases on code that
+// never encounters nullish inputs.
 func operatorTier(op string) Tier {
 	switch op {
 	case "negate_conditional", "conditional_boundary", "return_value", "math_operator",
-		"unwrap_removal", "some_to_none":
+		"unwrap_removal", "some_to_none",
+		"strict_equality":
 		return TierLogic
 	case "boolean_substitution", "incdec",
-		"question_mark_removal":
+		"question_mark_removal",
+		"nullish_to_logical_or", "optional_chain_removal":
 		return TierSemantic
 	case "statement_deletion", "branch_removal":
 		return TierObservability

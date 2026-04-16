@@ -17,6 +17,7 @@ import (
 	"github.com/0xPolygon/diffguard/internal/lang"
 	_ "github.com/0xPolygon/diffguard/internal/lang/goanalyzer"
 	_ "github.com/0xPolygon/diffguard/internal/lang/rustanalyzer"
+	_ "github.com/0xPolygon/diffguard/internal/lang/tsanalyzer"
 	"github.com/0xPolygon/diffguard/internal/mutation"
 	"github.com/0xPolygon/diffguard/internal/report"
 	"github.com/0xPolygon/diffguard/internal/sizes"
