@@ -88,11 +88,10 @@ import { util } from '~/lib/util';
 	if !srcEdges["util/bar"] {
 		t.Errorf("missing internal edge util/bar in %v", srcEdges)
 	}
-	// Project aliases: @/components/Card -> @/components (directory of the
-	// imported symbol), ~/lib/util -> lib/util (the directory, since
-	// resolveInternal folds 'util' as the target dir).
-	if !srcEdges["@/components"] {
-		t.Errorf("missing alias edge @/components in %v", srcEdges)
+	// Project aliases: @/components/Card -> @/components/Card (final segment
+	// kept; only /index folds), ~/lib/util -> lib/util.
+	if !srcEdges["@/components/Card"] {
+		t.Errorf("missing alias edge @/components/Card in %v", srcEdges)
 	}
 	if !srcEdges["lib/util"] {
 		t.Errorf("missing alias edge lib/util in %v", srcEdges)
@@ -148,7 +147,11 @@ func TestResolveInternal(t *testing.T) {
 		{"./foo", "src", "src/foo"},
 		{"./foo/bar", "src", "src/foo/bar"},
 		{"../util/x", "src/lib", "src/util/x"},
-		{"@/components/Card", "src", "@/components"},
+		// @/ aliases: final segment is kept; only /index folds.
+		{"@/components/Card", "src", "@/components/Card"},
+		{"@/components/index", "src", "@/components"},
+		{"@/components", "src", "@/components"},
+		// ~/ aliases: same folding semantics, no prefix retained.
 		{"~/lib/util", "src", "lib/util"},
 		{"lodash", "src", ""},
 		{"react-dom", "src", ""},

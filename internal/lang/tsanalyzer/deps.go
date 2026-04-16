@@ -165,22 +165,16 @@ func unquote(s string) string {
 //
 //	./foo              -> pkgDir/foo
 //	../shared/util     -> <parent>/shared/util
-//	@/components/Card  -> @/components (drop file segment)
+//	@/components/Card  -> @/components/Card  (final segment kept; only /index folds)
+//	@/components/index -> @/components       (index fold)
 //	~/lib/util         -> lib/util
 //	lodash             -> ""  (external)
 //
-// For alias imports (`@/...` and `~/...`) we treat the remaining path as
-// the imported module identifier. For `@/` specifically we keep the `@/`
-// prefix on the node so the graph visibly tags alias edges; for `~/` the
-// convention in most toolchains is that `~` points at the project root,
-// so we strip the prefix entirely.
-//
-// File-to-directory folding is unified across all specifier forms via
-// resolveRelative's `index` detection: specifiers ending in `/index` fold
-// to the containing directory. Other file-basename specifiers (e.g.
-// `@/components/Card`) retain the final segment because we can't tell
-// from the specifier alone whether `Card` is a file or a directory;
-// the existing alias test expectations reflect that.
+// Both `@/` and `~/` aliases treat the remaining path identically: the
+// final segment is kept as-is unless it is literally "index", in which
+// case it is folded to the parent directory. `@/` retains its prefix so
+// alias edges are visibly tagged in the graph; `~/` strips the prefix
+// because `~` conventionally points at the project root.
 func resolveInternal(spec, repoPath, pkgDir string) string {
 	if spec == "" {
 		return ""
@@ -189,15 +183,8 @@ func resolveInternal(spec, repoPath, pkgDir string) string {
 	case strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || spec == "." || spec == "..":
 		return resolveRelative(spec, pkgDir)
 	case strings.HasPrefix(spec, "@/"):
-		// Drop the final path segment under the @-alias so Card.tsx and
-		// the Card directory both collapse to @/components. Matches the
-		// Go analyzer's package-level edge granularity.
-		rest := spec[2:]
-		dir := filepath.Dir(rest)
-		if dir == "." || dir == "" {
-			return "@/"
-		}
-		return "@/" + filepath.ToSlash(dir)
+		rest := filepath.ToSlash(spec[2:])
+		return "@/" + foldIndex(rest)
 	case strings.HasPrefix(spec, "~/"):
 		return foldIndex(filepath.ToSlash(spec[2:]))
 	}
