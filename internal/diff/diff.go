@@ -49,7 +49,7 @@ func (fc FileChange) OverlapsRange(start, end int) bool {
 	return false
 }
 
-// Result holds all changed Go files parsed from a git diff.
+// Result holds all changed source files parsed from a git diff.
 type Result struct {
 	BaseBranch string
 	Files      []FileChange
@@ -79,8 +79,35 @@ func (r Result) FilesByPackage() map[string][]FileChange {
 	return m
 }
 
-// Parse runs git diff against the given base branch and parses changed Go files.
-func Parse(repoPath, baseBranch string) (*Result, error) {
+// Filter describes the subset of the diff the caller cares about. It is a
+// narrower shape than lang.FileFilter so the diff package doesn't have to
+// import lang (which would pull the full analyzer stack). Callers (usually
+// cmd/diffguard) construct a Filter from their chosen language's
+// lang.FileFilter and pass it here.
+type Filter struct {
+	// DiffGlobs is passed to `git diff -- <globs>` to restrict the raw diff
+	// to language source files.
+	DiffGlobs []string
+	// Includes reports whether an analyzable source path (extension matches,
+	// not a test file) belongs to the caller's language.
+	Includes func(path string) bool
+}
+
+// includes returns true iff the filter accepts the path. An empty filter
+// (Includes == nil) defaults to accepting every path — but production
+// callers always supply one.
+func (f Filter) includes(path string) bool {
+	if f.Includes == nil {
+		return true
+	}
+	return f.Includes(path)
+}
+
+// Parse runs `git diff` against the merge-base of baseBranch..HEAD and
+// returns the changed files that pass the filter. The filter is also used to
+// restrict the raw `git diff` output via -- globs so the parser never has to
+// see files from other languages.
+func Parse(repoPath, baseBranch string, filter Filter) (*Result, error) {
 	mergeBaseCmd := exec.Command("git", "merge-base", baseBranch, "HEAD")
 	mergeBaseCmd.Dir = repoPath
 	mergeBaseOut, err := mergeBaseCmd.Output()
@@ -89,14 +116,20 @@ func Parse(repoPath, baseBranch string) (*Result, error) {
 	}
 	mergeBase := strings.TrimSpace(string(mergeBaseOut))
 
-	cmd := exec.Command("git", "diff", "-U0", mergeBase, "--", "*.go")
+	args := []string{"diff", "-U0", mergeBase}
+	if len(filter.DiffGlobs) > 0 {
+		args = append(args, "--")
+		args = append(args, filter.DiffGlobs...)
+	}
+
+	cmd := exec.Command("git", args...)
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git diff failed: %w", err)
 	}
 
-	files, err := parseUnifiedDiff(string(out))
+	files, err := parseUnifiedDiff(string(out), filter)
 	if err != nil {
 		return nil, err
 	}
@@ -107,18 +140,19 @@ func Parse(repoPath, baseBranch string) (*Result, error) {
 	}, nil
 }
 
-// CollectPaths builds a Result by treating each .go file under the given
-// paths as fully changed. Useful for refactoring mode where you want to
-// analyze entire files rather than diffed regions only.
+// CollectPaths builds a Result by treating each analyzable source file under
+// the given paths as fully changed. Useful for refactoring mode where you
+// want to analyze entire files rather than diffed regions only.
 //
 // paths may contain individual files or directories (walked recursively).
-// Test files (_test.go) are excluded to match Parse's behavior.
-func CollectPaths(repoPath string, paths []string) (*Result, error) {
+// Files that fail filter.Includes are excluded — test files and non-source
+// files never show up in the result.
+func CollectPaths(repoPath string, paths []string, filter Filter) (*Result, error) {
 	var files []FileChange
 	seen := make(map[string]bool)
 
 	for _, p := range paths {
-		if err := collectPath(repoPath, p, &files, seen); err != nil {
+		if err := collectPath(repoPath, p, filter, &files, seen); err != nil {
 			return nil, err
 		}
 	}
@@ -126,7 +160,7 @@ func CollectPaths(repoPath string, paths []string) (*Result, error) {
 	return &Result{Files: files}, nil
 }
 
-func collectPath(repoPath, p string, files *[]FileChange, seen map[string]bool) error {
+func collectPath(repoPath, p string, filter Filter, files *[]FileChange, seen map[string]bool) error {
 	absPath := p
 	if !filepath.IsAbs(p) {
 		absPath = filepath.Join(repoPath, p)
@@ -136,25 +170,25 @@ func collectPath(repoPath, p string, files *[]FileChange, seen map[string]bool) 
 		return fmt.Errorf("stat %s: %w", p, err)
 	}
 	if info.IsDir() {
-		return collectDir(repoPath, absPath, files, seen)
+		return collectDir(repoPath, absPath, filter, files, seen)
 	}
-	return addFile(repoPath, absPath, files, seen)
+	return addFile(repoPath, absPath, filter, files, seen)
 }
 
-func collectDir(repoPath, absPath string, files *[]FileChange, seen map[string]bool) error {
+func collectDir(repoPath, absPath string, filter Filter, files *[]FileChange, seen map[string]bool) error {
 	return filepath.WalkDir(absPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !isAnalyzableGoFile(path) {
+		if d.IsDir() || !filter.includes(path) {
 			return nil
 		}
-		return addFile(repoPath, path, files, seen)
+		return addFile(repoPath, path, filter, files, seen)
 	})
 }
 
-func addFile(repoPath, absPath string, files *[]FileChange, seen map[string]bool) error {
-	if !isAnalyzableGoFile(absPath) {
+func addFile(repoPath, absPath string, filter Filter, files *[]FileChange, seen map[string]bool) error {
+	if !filter.includes(absPath) {
 		return nil
 	}
 	rel, err := filepath.Rel(repoPath, absPath)
@@ -172,12 +206,9 @@ func addFile(repoPath, absPath string, files *[]FileChange, seen map[string]bool
 	return nil
 }
 
-func isAnalyzableGoFile(path string) bool {
-	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
-}
-
-// parseUnifiedDiff parses the output of git diff -U0 into FileChange entries.
-func parseUnifiedDiff(diffOutput string) ([]FileChange, error) {
+// parseUnifiedDiff parses the output of git diff -U0 into FileChange entries,
+// dropping files that don't match filter.Includes.
+func parseUnifiedDiff(diffOutput string, filter Filter) ([]FileChange, error) {
 	var files []FileChange
 	var current *FileChange
 
@@ -186,7 +217,7 @@ func parseUnifiedDiff(diffOutput string) ([]FileChange, error) {
 		line := scanner.Text()
 
 		if strings.HasPrefix(line, "+++ b/") {
-			current = handleFileLine(line, &files)
+			current = handleFileLine(line, filter, &files)
 			continue
 		}
 
@@ -198,9 +229,9 @@ func parseUnifiedDiff(diffOutput string) ([]FileChange, error) {
 	return files, scanner.Err()
 }
 
-func handleFileLine(line string, files *[]FileChange) *FileChange {
+func handleFileLine(line string, filter Filter, files *[]FileChange) *FileChange {
 	path := strings.TrimPrefix(line, "+++ b/")
-	if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+	if !filter.includes(path) {
 		return nil
 	}
 	*files = append(*files, FileChange{Path: path})

@@ -13,6 +13,8 @@ import (
 	"github.com/0xPolygon/diffguard/internal/complexity"
 	"github.com/0xPolygon/diffguard/internal/deps"
 	"github.com/0xPolygon/diffguard/internal/diff"
+	"github.com/0xPolygon/diffguard/internal/lang"
+	_ "github.com/0xPolygon/diffguard/internal/lang/goanalyzer"
 	"github.com/0xPolygon/diffguard/internal/mutation"
 	"github.com/0xPolygon/diffguard/internal/report"
 	"github.com/0xPolygon/diffguard/internal/sizes"
@@ -77,7 +79,13 @@ type Config struct {
 }
 
 func run(repoPath string, cfg Config) error {
-	d, err := loadFiles(repoPath, cfg)
+	goLang, ok := lang.Get("go")
+	if !ok {
+		return fmt.Errorf("go analyzer not registered")
+	}
+	filter := diffFilter(goLang)
+
+	d, err := loadFiles(repoPath, cfg, filter)
 	if err != nil {
 		return err
 	}
@@ -180,23 +188,36 @@ func checkExitCode(r report.Report, failOn string) error {
 	return nil
 }
 
-func loadFiles(repoPath string, cfg Config) (*diff.Result, error) {
+func loadFiles(repoPath string, cfg Config, filter diff.Filter) (*diff.Result, error) {
 	if cfg.Paths != "" {
 		paths := strings.Split(cfg.Paths, ",")
 		for i := range paths {
 			paths[i] = strings.TrimSpace(paths[i])
 		}
-		d, err := diff.CollectPaths(repoPath, paths)
+		d, err := diff.CollectPaths(repoPath, paths, filter)
 		if err != nil {
 			return nil, fmt.Errorf("collecting paths: %w", err)
 		}
 		return d, nil
 	}
-	d, err := diff.Parse(repoPath, cfg.BaseBranch)
+	d, err := diff.Parse(repoPath, cfg.BaseBranch, filter)
 	if err != nil {
 		return nil, fmt.Errorf("parsing diff: %w", err)
 	}
 	return d, nil
+}
+
+// diffFilter converts a language's lang.FileFilter into the diff.Filter
+// shape the parser expects. The two shapes are intentionally different:
+// lang.FileFilter exposes the fields languages need to declare their
+// territory (extensions, IsTestFile, DiffGlobs), while diff.Filter only
+// carries what the parser itself reads on each file (Includes + DiffGlobs).
+func diffFilter(l lang.Language) diff.Filter {
+	f := l.FileFilter()
+	return diff.Filter{
+		DiffGlobs: f.DiffGlobs,
+		Includes:  f.IncludesSource,
+	}
 }
 
 func detectBaseBranch(repoPath string) string {
