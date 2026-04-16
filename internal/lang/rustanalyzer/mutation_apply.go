@@ -183,27 +183,23 @@ func applyReturnValue(root *sitter.Node, src []byte, site lang.MutantSite) []byt
 	return replaceRange(src, value.StartByte(), value.EndByte(), []byte("Default::default()"))
 }
 
-// applySomeToNone replaces `return Some(x)` with `return None`.
+// applySomeToNone replaces a `Some(x)` call expression with `None`. The
+// target can sit anywhere — inside a return, as the tail expression of
+// a block, as an argument to another function, etc. We find the first
+// call_expression on the line whose function identifier is exactly
+// `Some` and rewrite the entire call to `None`.
 func applySomeToNone(root *sitter.Node, src []byte, site lang.MutantSite) []byte {
-	ret := findOnLine(root, site.Line, func(n *sitter.Node) bool {
-		return n.Type() == "return_expression"
+	call := findOnLine(root, site.Line, func(n *sitter.Node) bool {
+		if n.Type() != "call_expression" {
+			return false
+		}
+		fn := n.ChildByFieldName("function")
+		return fn != nil && nodeText(fn, src) == "Some"
 	})
-	if ret == nil {
+	if call == nil {
 		return nil
 	}
-	var value *sitter.Node
-	for i := 0; i < int(ret.NamedChildCount()); i++ {
-		value = ret.NamedChild(i)
-		break
-	}
-	if value == nil || value.Type() != "call_expression" {
-		return nil
-	}
-	fn := value.ChildByFieldName("function")
-	if fn == nil || nodeText(fn, src) != "Some" {
-		return nil
-	}
-	return replaceRange(src, value.StartByte(), value.EndByte(), []byte("None"))
+	return replaceRange(src, call.StartByte(), call.EndByte(), []byte("None"))
 }
 
 // applyBranchRemoval empties the consequence block of an if_expression.

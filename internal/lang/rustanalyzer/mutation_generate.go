@@ -66,7 +66,10 @@ func mutantsFor(file string, line int, n *sitter.Node, src []byte) []lang.Mutant
 	case "expression_statement":
 		return exprStmtMutants(file, line, n, src)
 	case "call_expression":
-		return unwrapMutants(file, line, n, src)
+		if mutants := unwrapMutants(file, line, n, src); len(mutants) > 0 {
+			return mutants
+		}
+		return someCallMutants(file, line, n, src)
 	case "try_expression":
 		return tryMutants(file, line, n)
 	case "scoped_identifier", "identifier":
@@ -156,13 +159,14 @@ func boolMutants(file string, line int, n *sitter.Node, src []byte) []lang.Mutan
 	}}
 }
 
-// returnMutants covers two Rust-specific cases under the canonical
-// return_value operator name: `Default::default()` substitution and
-// `Some(x) -> None` (an optional-return swap called some_to_none in the
-// design doc).
+// returnMutants emits the canonical return_value operator — replace the
+// return expression with `Default::default()`. A bare `return;` (unit
+// return) has no expression to mutate, so we skip.
 //
-// A bare `return;` (unit return) has no expression to mutate, so we skip.
-func returnMutants(file string, line int, n *sitter.Node, src []byte) []lang.MutantSite {
+// `some_to_none` is emitted separately from the Some(x) call site itself
+// (see someCallMutants), not here — the operator applies to any Some(x)
+// construction, not only those that appear directly in a return.
+func returnMutants(file string, line int, n *sitter.Node, _ []byte) []lang.MutantSite {
 	// A return_expression has at most one named child — the returned value.
 	var value *sitter.Node
 	for i := 0; i < int(n.NamedChildCount()); i++ {
@@ -170,50 +174,40 @@ func returnMutants(file string, line int, n *sitter.Node, src []byte) []lang.Mut
 		break
 	}
 	if value == nil {
-		// `return;` — nothing to mutate.
 		return nil
 	}
-
-	var out []lang.MutantSite
-	if someVal, ok := matchSome(value, src); ok {
-		out = append(out, lang.MutantSite{
-			File:        file,
-			Line:        line,
-			Description: fmt.Sprintf("Some(%s) -> None", someVal),
-			Operator:    "some_to_none",
-		})
-	}
-	out = append(out, lang.MutantSite{
+	return []lang.MutantSite{{
 		File:        file,
 		Line:        line,
 		Description: "replace return value with Default::default()",
 		Operator:    "return_value",
-	})
-	return out
+	}}
 }
 
-// matchSome reports whether value is a `Some(expr)` call expression and
-// returns the inner expression text if so. We use this to generate a
-// descriptive mutant description ("Some(x) -> None") rather than a generic
-// "return_value" blurb. Tree-sitter parses `Some(x)` as a call_expression
-// whose function is the identifier `Some`.
-func matchSome(value *sitter.Node, src []byte) (string, bool) {
-	if value == nil || value.Type() != "call_expression" {
-		return "", false
-	}
-	fn := value.ChildByFieldName("function")
+// someCallMutants emits the some_to_none operator for any Some(x) call
+// expression. The operator applies broadly — any optional constructor
+// that tests rely on will be killed if the tests differentiate "value
+// present" from "value absent".
+//
+// Tree-sitter models `Some(x)` as (call_expression function: (identifier
+// "Some") arguments: (arguments ...)).
+func someCallMutants(file string, line int, n *sitter.Node, src []byte) []lang.MutantSite {
+	fn := n.ChildByFieldName("function")
 	if fn == nil || nodeText(fn, src) != "Some" {
-		return "", false
+		return nil
 	}
-	args := value.ChildByFieldName("arguments")
+	args := n.ChildByFieldName("arguments")
 	if args == nil {
-		return "", false
+		return nil
 	}
-	// Grab the text between the parens, trimmed.
-	argText := nodeText(args, src)
-	argText = strings.TrimPrefix(argText, "(")
-	argText = strings.TrimSuffix(argText, ")")
-	return strings.TrimSpace(argText), true
+	argText := strings.TrimSpace(strings.TrimSuffix(
+		strings.TrimPrefix(nodeText(args, src), "("), ")"))
+	return []lang.MutantSite{{
+		File:        file,
+		Line:        line,
+		Description: fmt.Sprintf("Some(%s) -> None", argText),
+		Operator:    "some_to_none",
+	}}
 }
 
 // ifMutants empties an if_expression body (branch_removal).
