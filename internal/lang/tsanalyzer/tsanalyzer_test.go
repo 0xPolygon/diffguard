@@ -85,6 +85,30 @@ func TestFileFilterIncludesSource(t *testing.T) {
 	}
 }
 
+// TestFileFilter_MjsCjsExcluded asserts that .mjs and .cjs files are NOT
+// accepted by the TypeScript file filter. The analyzer is scoped to .ts /
+// .tsx only; CommonJS-module variants are out of scope just like plain .js.
+func TestFileFilter_MjsCjsExcluded(t *testing.T) {
+	l, _ := lang.Get("typescript")
+	ff := l.FileFilter()
+	cases := []struct {
+		path string
+	}{
+		{"src/app.mjs"},
+		{"src/app.cjs"},
+		{"src/util.mjs"},
+		{"lib/index.cjs"},
+	}
+	for _, tc := range cases {
+		if ff.IncludesSource(tc.path) {
+			t.Errorf("IncludesSource(%q) = true, want false (.mjs/.cjs must be excluded)", tc.path)
+		}
+		if ff.MatchesExtension(tc.path) {
+			t.Errorf("MatchesExtension(%q) = true, want false (.mjs/.cjs not a TS extension)", tc.path)
+		}
+	}
+}
+
 // TestDetector_TSRepoMatches asserts a repo with package.json + at least
 // one .ts file matches, while a JS-only repo (package.json + only .js)
 // does NOT match. This is the behavior promised by the design doc.
@@ -162,6 +186,32 @@ func TestDetector_IgnoresNodeModules(t *testing.T) {
 
 	if hasTSFile(root) {
 		t.Error("hasTSFile should skip node_modules and return false for JS-only repo layout")
+	}
+}
+
+// TestDetector_IgnoresNextDir ensures framework build output directories
+// (e.g. .next) are pruned by hasTSFile. A package.json with only a
+// .ts file inside .next must NOT cause TypeScript detection to fire.
+func TestDetector_IgnoresNextDir(t *testing.T) {
+	root := t.TempDir()
+	if err := writeFile(filepath.Join(root, "package.json"), []byte(`{"name":"demo"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// A generated .ts file under .next — the detector must prune this dir.
+	if err := writeFile(filepath.Join(root, ".next", "foo.ts"), []byte(`export const x = 1;`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if hasTSFile(root) {
+		t.Error("hasTSFile should skip .next and return false when no real .ts files exist outside it")
+	}
+
+	// Confirm detection stays off at the language level too.
+	langs := lang.Detect(root)
+	for _, l := range langs {
+		if l.Name() == "typescript" {
+			t.Error("typescript should not be detected when .ts files only exist under .next")
+		}
 	}
 }
 

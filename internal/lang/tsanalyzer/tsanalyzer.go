@@ -108,10 +108,14 @@ func hasTSFile(root string) bool {
 			return nil
 		}
 		if d.IsDir() {
-			// Common heavy/noisy dirs we never want to traverse.
+			// Common heavy/noisy dirs we never want to traverse —
+			// framework build caches and output directories are included
+			// so that generated .ts files don't trigger detection.
 			name := d.Name()
 			if name == "node_modules" || name == ".git" || name == "dist" ||
-				name == "build" || name == "out" || name == "coverage" {
+				name == "build" || name == "out" || name == "coverage" ||
+				name == ".next" || name == ".nuxt" || name == ".output" ||
+				name == ".svelte-kit" || name == ".turbo" || name == ".cache" {
 				return filepath.SkipDir
 			}
 			return nil
