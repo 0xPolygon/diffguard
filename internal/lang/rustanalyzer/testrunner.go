@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 
 	"github.com/0xPolygon/diffguard/internal/lang"
@@ -146,41 +145,3 @@ func cargoTestArgs(cfg lang.TestRunConfig) []string {
 	return r.buildArgs(cfg)
 }
 
-// backupAndRestore is exposed for tests that want to verify the
-// restore-on-panic guarantee without actually invoking cargo.
-//
-// It writes `mutantBytes` over `path`, runs `work`, and restores
-// `originalBytes` via defer. Returns the original unmodified bytes so the
-// caller can assert restoration.
-//
-//nolint:unused // used by testrunner_test.go
-func backupAndRestore(path string, originalBytes, mutantBytes []byte, work func()) (restored []byte, err error) {
-	defer func() {
-		_ = os.WriteFile(path, originalBytes, 0644)
-		restored, err = os.ReadFile(path)
-	}()
-	if err := os.WriteFile(path, mutantBytes, 0644); err != nil {
-		return nil, err
-	}
-	work()
-	return nil, nil
-}
-
-// AtomicCopy copies src to dst; used to build a file-level "backup"
-// location if a caller prefers backing up to a sibling path rather than
-// holding bytes in memory. We don't use this from RunTest (in-memory is
-// cheap for source files) but leave it here for future runners that may
-// need on-disk backups.
-//
-//nolint:unused
-func AtomicCopy(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	tmp := filepath.Join(filepath.Dir(dst), ".diffguard-backup-tmp")
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, dst)
-}

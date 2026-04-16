@@ -21,6 +21,14 @@ func TestOperatorTier(t *testing.T) {
 		{"incdec", TierSemantic},
 		{"statement_deletion", TierObservability},
 		{"branch_removal", TierObservability},
+		// Rust-specific: unwrap_removal and some_to_none encode real test
+		// gaps when they survive (well-tested code exercises error paths),
+		// so they land in Tier 1. question_mark_removal has a higher
+		// equivalent-mutant rate because callers can substitute their own
+		// error plumbing, so it sits in Tier 2.
+		{"unwrap_removal", TierLogic},
+		{"some_to_none", TierLogic},
+		{"question_mark_removal", TierSemantic},
 		// Unknown defaults to TierSemantic so new operators don't silently
 		// land in the noise-prone tier.
 		{"unknown_operator", TierSemantic},
