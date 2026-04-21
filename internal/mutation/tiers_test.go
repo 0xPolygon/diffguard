@@ -21,6 +21,23 @@ func TestOperatorTier(t *testing.T) {
 		{"incdec", TierSemantic},
 		{"statement_deletion", TierObservability},
 		{"branch_removal", TierObservability},
+		// Rust-specific: unwrap_removal and some_to_none encode real test
+		// gaps when they survive (well-tested code exercises error paths),
+		// so they land in Tier 1. question_mark_removal has a higher
+		// equivalent-mutant rate because callers can substitute their own
+		// error plumbing, so it sits in Tier 2.
+		{"unwrap_removal", TierLogic},
+		{"some_to_none", TierLogic},
+		{"question_mark_removal", TierSemantic},
+		// TypeScript-specific: strict_equality toggles === vs == — when a
+		// surviving mutant doesn't get caught the test suite almost certainly
+		// isn't exercising strict-comparison semantics, so Tier 1.
+		// nullish_to_logical_or and optional_chain_removal have higher
+		// equivalent-mutant rates because code that never encounters nullish
+		// inputs won't distinguish the mutated form, so they're Tier 2.
+		{"strict_equality", TierLogic},
+		{"nullish_to_logical_or", TierSemantic},
+		{"optional_chain_removal", TierSemantic},
 		// Unknown defaults to TierSemantic so new operators don't silently
 		// land in the noise-prone tier.
 		{"unknown_operator", TierSemantic},

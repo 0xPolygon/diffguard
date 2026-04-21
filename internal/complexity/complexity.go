@@ -1,235 +1,43 @@
+// Package complexity runs a language's ComplexityCalculator across a diff's
+// changed files and formats the results into a report.Section.
+//
+// All AST-level work happens in the language back-end (for Go:
+// internal/lang/goanalyzer/complexity.go). This package is now a thin
+// orchestrator — threshold check, severity derivation, per-language stats
+// summary — so new languages inherit the analyzer for free by implementing
+// lang.ComplexityCalculator.
 package complexity
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"math"
 	"path/filepath"
 	"sort"
 
 	"github.com/0xPolygon/diffguard/internal/diff"
+	"github.com/0xPolygon/diffguard/internal/lang"
 	"github.com/0xPolygon/diffguard/internal/report"
 )
 
-// FunctionComplexity holds the complexity result for a single function.
-type FunctionComplexity struct {
-	File       string
-	Line       int
-	Name       string
-	Complexity int
-}
-
-// Analyze computes cognitive complexity for all functions in changed regions of the diff.
-func Analyze(repoPath string, d *diff.Result, threshold int) (report.Section, error) {
-	var results []FunctionComplexity
-
+// Analyze computes cognitive complexity for all functions in the diff's
+// changed regions using the supplied language calculator, then produces the
+// "Cognitive Complexity" report section. Parse errors are swallowed at the
+// calculator layer (returning nil) so a single malformed file doesn't fail
+// the whole run.
+func Analyze(repoPath string, d *diff.Result, threshold int, calc lang.ComplexityCalculator) (report.Section, error) {
+	var results []lang.FunctionComplexity
 	for _, fc := range d.Files {
-		results = append(results, analyzeFile(repoPath, fc)...)
+		absPath := filepath.Join(repoPath, fc.Path)
+		fnResults, err := calc.AnalyzeFile(absPath, fc)
+		if err != nil {
+			return report.Section{}, fmt.Errorf("analyzing %s: %w", fc.Path, err)
+		}
+		results = append(results, fnResults...)
 	}
-
 	return buildSection(results, threshold), nil
 }
 
-func analyzeFile(repoPath string, fc diff.FileChange) []FunctionComplexity {
-	absPath := filepath.Join(repoPath, fc.Path)
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, absPath, nil, 0)
-	if err != nil {
-		return nil
-	}
-
-	var results []FunctionComplexity
-	ast.Inspect(f, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
-		}
-
-		startLine := fset.Position(fn.Pos()).Line
-		endLine := fset.Position(fn.End()).Line
-
-		if !fc.OverlapsRange(startLine, endLine) {
-			return false
-		}
-
-		results = append(results, FunctionComplexity{
-			File:       fc.Path,
-			Line:       startLine,
-			Name:       funcName(fn),
-			Complexity: computeComplexity(fn.Body),
-		})
-
-		return false
-	})
-	return results
-}
-
-// computeComplexity calculates cognitive complexity of a function body.
-func computeComplexity(body *ast.BlockStmt) int {
-	if body == nil {
-		return 0
-	}
-	return walkBlock(body.List, 0)
-}
-
-func walkBlock(stmts []ast.Stmt, nesting int) int {
-	total := 0
-	for _, stmt := range stmts {
-		total += walkStmt(stmt, nesting)
-	}
-	return total
-}
-
-func walkStmt(stmt ast.Stmt, nesting int) int {
-	switch s := stmt.(type) {
-	case *ast.IfStmt:
-		return walkIfStmt(s, nesting)
-	case *ast.ForStmt:
-		return walkForStmt(s, nesting)
-	case *ast.RangeStmt:
-		return 1 + nesting + walkBlock(s.Body.List, nesting+1)
-	case *ast.SwitchStmt:
-		return 1 + nesting + walkBlock(s.Body.List, nesting+1)
-	case *ast.TypeSwitchStmt:
-		return 1 + nesting + walkBlock(s.Body.List, nesting+1)
-	case *ast.SelectStmt:
-		return 1 + nesting + walkBlock(s.Body.List, nesting+1)
-	case *ast.CaseClause:
-		return walkBlock(s.Body, nesting)
-	case *ast.CommClause:
-		return walkBlock(s.Body, nesting)
-	case *ast.BlockStmt:
-		return walkBlock(s.List, nesting)
-	case *ast.LabeledStmt:
-		return walkStmt(s.Stmt, nesting)
-	case *ast.AssignStmt:
-		return walkExprsForFuncLit(s.Rhs, nesting)
-	case *ast.ExprStmt:
-		return walkExprForFuncLit(s.X, nesting)
-	case *ast.ReturnStmt:
-		return walkExprsForFuncLit(s.Results, nesting)
-	case *ast.GoStmt:
-		return walkExprForFuncLit(s.Call.Fun, nesting)
-	case *ast.DeferStmt:
-		return walkExprForFuncLit(s.Call.Fun, nesting)
-	}
-	return 0
-}
-
-func walkIfStmt(s *ast.IfStmt, nesting int) int {
-	total := 1 + nesting
-	total += countLogicalOps(s.Cond)
-	if s.Init != nil {
-		total += walkStmt(s.Init, nesting)
-	}
-	total += walkBlock(s.Body.List, nesting+1)
-	if s.Else != nil {
-		total += walkElseChain(s.Else, nesting)
-	}
-	return total
-}
-
-func walkForStmt(s *ast.ForStmt, nesting int) int {
-	total := 1 + nesting
-	if s.Cond != nil {
-		total += countLogicalOps(s.Cond)
-	}
-	total += walkBlock(s.Body.List, nesting+1)
-	return total
-}
-
-func walkElseChain(node ast.Node, nesting int) int {
-	switch e := node.(type) {
-	case *ast.IfStmt:
-		total := 1
-		total += countLogicalOps(e.Cond)
-		if e.Init != nil {
-			total += walkStmt(e.Init, nesting)
-		}
-		total += walkBlock(e.Body.List, nesting+1)
-		if e.Else != nil {
-			total += walkElseChain(e.Else, nesting)
-		}
-		return total
-	case *ast.BlockStmt:
-		return 1 + walkBlock(e.List, nesting+1)
-	}
-	return 0
-}
-
-func walkExprsForFuncLit(exprs []ast.Expr, nesting int) int {
-	total := 0
-	for _, expr := range exprs {
-		total += walkExprForFuncLit(expr, nesting)
-	}
-	return total
-}
-
-func walkExprForFuncLit(expr ast.Expr, nesting int) int {
-	total := 0
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if fl, ok := n.(*ast.FuncLit); ok {
-			total += walkBlock(fl.Body.List, nesting+1)
-			return false
-		}
-		return true
-	})
-	return total
-}
-
-// countLogicalOps counts sequences of && and || in an expression.
-func countLogicalOps(expr ast.Expr) int {
-	if expr == nil {
-		return 0
-	}
-	ops := flattenLogicalOps(expr)
-	if len(ops) == 0 {
-		return 0
-	}
-	count := 1
-	for i := 1; i < len(ops); i++ {
-		if ops[i] != ops[i-1] {
-			count++
-		}
-	}
-	return count
-}
-
-func flattenLogicalOps(expr ast.Expr) []token.Token {
-	bin, ok := expr.(*ast.BinaryExpr)
-	if !ok {
-		return nil
-	}
-	if bin.Op != token.LAND && bin.Op != token.LOR {
-		return nil
-	}
-	var ops []token.Token
-	ops = append(ops, flattenLogicalOps(bin.X)...)
-	ops = append(ops, bin.Op)
-	ops = append(ops, flattenLogicalOps(bin.Y)...)
-	return ops
-}
-
-func funcName(fn *ast.FuncDecl) string {
-	if fn.Recv != nil && len(fn.Recv.List) > 0 {
-		recv := fn.Recv.List[0]
-		var typeName string
-		switch t := recv.Type.(type) {
-		case *ast.StarExpr:
-			if ident, ok := t.X.(*ast.Ident); ok {
-				typeName = ident.Name
-			}
-		case *ast.Ident:
-			typeName = t.Name
-		}
-		return fmt.Sprintf("(%s).%s", typeName, fn.Name.Name)
-	}
-	return fn.Name.Name
-}
-
-func collectComplexityFindings(results []FunctionComplexity, threshold int) ([]report.Finding, []float64, int) {
+func collectComplexityFindings(results []lang.FunctionComplexity, threshold int) ([]report.Finding, []float64, int) {
 	var findings []report.Finding
 	var values []float64
 	failCount := 0
@@ -258,7 +66,7 @@ func collectComplexityFindings(results []FunctionComplexity, threshold int) ([]r
 	return findings, values, failCount
 }
 
-func buildSection(results []FunctionComplexity, threshold int) report.Section {
+func buildSection(results []lang.FunctionComplexity, threshold int) report.Section {
 	if len(results) == 0 {
 		return report.Section{
 			Name:     "Cognitive Complexity",
