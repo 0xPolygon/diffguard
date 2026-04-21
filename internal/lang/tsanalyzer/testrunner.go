@@ -82,10 +82,7 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 
 	// Defer restore BEFORE writing so a panic between write and run can't
 	// leave corrupt source behind.
-	restore := func() {
-		_ = os.WriteFile(cfg.OriginalFile, originalBytes, 0644)
-	}
-	defer restore()
+	defer func() { _ = os.WriteFile(cfg.OriginalFile, originalBytes, 0644) }()
 
 	if err := os.WriteFile(cfg.OriginalFile, mutantBytes, 0644); err != nil {
 		return false, "", fmt.Errorf("writing mutant over original: %w", err)
@@ -98,6 +95,15 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	killed, output := r.runCommand(ctx, cfg)
+	return killed, output, nil
+}
+
+// runCommand spawns the test runner under ctx, captures combined stdout +
+// stderr, and reports whether the mutant was killed. A non-zero exit or a
+// context-deadline cancellation both count as killed; only a clean exit
+// means the mutant survived.
+func (r *testRunnerImpl) runCommand(ctx context.Context, cfg lang.TestRunConfig) (bool, string) {
 	cmdName, args := r.buildCommand(cfg)
 	cmd := exec.CommandContext(ctx, cmdName, args...)
 	cmd.Dir = cfg.RepoPath
@@ -111,14 +117,10 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 
 	runErr := cmd.Run()
 	output := combined.String()
-
-	if ctx.Err() == context.DeadlineExceeded {
-		return true, output, nil
+	if ctx.Err() == context.DeadlineExceeded || runErr != nil {
+		return true, output
 	}
-	if runErr != nil {
-		return true, output, nil
-	}
-	return false, output, nil
+	return false, output
 }
 
 // buildCommand returns the argv to execute for this RunTest call.
