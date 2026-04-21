@@ -1,0 +1,12 @@
+{
+  "worst_severity": "FAIL",
+  "sections": [
+    {
+      "name": "Code Sizes",
+      "severity": "FAIL",
+      "must_have_findings": [
+        {"file": "long.ts", "function": "longFunc", "severity": "FAIL"}
+      ]
+    }
+  ]
+}
