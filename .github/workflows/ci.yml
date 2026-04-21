@@ -21,6 +21,27 @@ jobs:
           go-version: '1.26.1'
           cache: true
 
+      # Rust toolchain is required by the mutation-flavored Rust evals
+      # (cargo test is how survived-vs-killed is decided). Without this
+      # step, the mutation evals t.Skip via exec.LookPath("cargo").
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache cargo registry + git + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            internal/lang/rustanalyzer/evaldata/**/target
+            cmd/diffguard/testdata/mixed-repo/**/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
       # Node is required by the TS mutation evals (npm test -> vitest /
       # node). Minimum 22.6 so `--experimental-strip-types` is default.
       - uses: actions/setup-node@v4
@@ -44,10 +65,26 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Dedicated eval passes. These are redundant with `go test ./...`
+      # above (which runs the same tests when cargo/node are present) but
+      # we run them separately so a failed eval is attributed to the
+      # right language subsystem in the CI log.
+      - name: Eval — Rust (EVAL-2)
+        env:
+          CI: "true"
+          CARGO_INCREMENTAL: "0"
+        run: make eval-rust
+
       - name: Eval — TypeScript (EVAL-3)
         env:
           CI: "true"
         run: make eval-ts
+
+      - name: Eval — Mixed / cross-cutting (EVAL-4 + E1)
+        env:
+          CI: "true"
+          CARGO_INCREMENTAL: "0"
+        run: make eval-mixed
 
   diffguard:
     # Dogfooding: run diffguard's own quality gate against this repo.
