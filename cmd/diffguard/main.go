@@ -82,6 +82,14 @@ type Config struct {
 	Language              string
 }
 
+// langResult bundles the per-language analysis output so the orchestrator
+// can merge sections after every language has been processed.
+type langResult struct {
+	lang     lang.Language
+	diff     *diff.Result
+	sections []report.Section
+}
+
 // run resolves the language set (explicit --language flag or auto-detect via
 // manifest scan), then invokes the analyzer pipeline once per language and
 // merges the resulting sections into a single report.
@@ -91,45 +99,78 @@ func run(repoPath string, cfg Config) error {
 		return err
 	}
 
-	// Collect per-language analysis. suffix-per-section only when more than
-	// one language contributes, so the single-language invocation stays
-	// byte-identical to the pre-multi-language output.
-	type langResult struct {
-		lang     lang.Language
-		diff     *diff.Result
-		sections []report.Section
+	results, done, err := collectLanguageResults(repoPath, cfg, languages)
+	if err != nil || done {
+		return err
 	}
-	var results []langResult
-	for _, l := range languages {
-		d, err := loadFiles(repoPath, cfg, diffFilter(l))
-		if err != nil {
-			return err
-		}
-		if len(d.Files) == 0 {
-			// Empty language: report nothing for it. When only one language
-			// is in play we preserve the legacy UX with a specific message.
-			if len(languages) == 1 {
-				fmt.Printf("No %s files found.\n", languageNoun(l))
-				return nil
-			}
-			fmt.Fprintf(os.Stderr, "No %s files found; skipping.\n", languageNoun(l))
-			continue
-		}
-		announceRun(d, cfg, l, len(languages))
-		sections, err := runAnalyses(repoPath, d, cfg, l)
-		if err != nil {
-			return err
-		}
-		results = append(results, langResult{lang: l, diff: d, sections: sections})
-	}
-
 	if len(results) == 0 {
 		fmt.Printf("No %s files found.\n", languageNoun(languages[0]))
 		return nil
 	}
 
-	var allSections []report.Section
+	rpt := report.Report{Sections: mergeLanguageSections(results)}
+	if err := writeReport(rpt, cfg.Output); err != nil {
+		return err
+	}
+	return checkExitCode(rpt, cfg.FailOn)
+}
+
+// collectLanguageResults runs the analyzer pipeline once per language and
+// returns the per-language sections. `done` is true when a single-language
+// run discovered no files (the legacy byte-identical "No X files found."
+// message has been emitted and run() should exit without writing a report).
+func collectLanguageResults(repoPath string, cfg Config, languages []lang.Language) ([]langResult, bool, error) {
+	var results []langResult
+	for _, l := range languages {
+		r, skip, done, err := analyzeLanguage(repoPath, cfg, l, len(languages))
+		if err != nil {
+			return nil, false, err
+		}
+		if done {
+			return nil, true, nil
+		}
+		if skip {
+			continue
+		}
+		results = append(results, r)
+	}
+	return results, false, nil
+}
+
+// analyzeLanguage runs the pipeline for one language. Returns:
+//   - (result, false, false, nil) when analysis ran and produced sections.
+//   - (_, true, false, nil)       when the language contributed no files in a
+//     multi-language run (skipped, a status line is emitted to stderr).
+//   - (_, _, true, nil)           when a single-language run found no files
+//     (the caller should exit without writing a report — legacy UX).
+//   - (_, _, _, err)              on pipeline failure.
+func analyzeLanguage(repoPath string, cfg Config, l lang.Language, numLanguages int) (langResult, bool, bool, error) {
+	d, err := loadFiles(repoPath, cfg, diffFilter(l))
+	if err != nil {
+		return langResult{}, false, false, err
+	}
+	if len(d.Files) == 0 {
+		if numLanguages == 1 {
+			fmt.Printf("No %s files found.\n", languageNoun(l))
+			return langResult{}, false, true, nil
+		}
+		fmt.Fprintf(os.Stderr, "No %s files found; skipping.\n", languageNoun(l))
+		return langResult{}, true, false, nil
+	}
+	announceRun(d, cfg, l, numLanguages)
+	sections, err := runAnalyses(repoPath, d, cfg, l)
+	if err != nil {
+		return langResult{}, false, false, err
+	}
+	return langResult{lang: l, diff: d, sections: sections}, false, false, nil
+}
+
+// mergeLanguageSections flattens per-language sections into a single list.
+// In a multi-language run each section name is suffixed with `[<lang>]` and
+// the combined list is sorted lexicographically for stable ordering.
+func mergeLanguageSections(results []langResult) []report.Section {
 	multi := len(results) > 1
+	var allSections []report.Section
 	for _, r := range results {
 		for _, s := range r.sections {
 			if multi {
@@ -138,20 +179,12 @@ func run(repoPath string, cfg Config) error {
 			allSections = append(allSections, s)
 		}
 	}
-
-	// When multi-language, sort by (language, metric) lexicographically so
-	// section ordering is stable across runs and hosts.
 	if multi {
 		sort.SliceStable(allSections, func(i, j int) bool {
 			return allSections[i].Name < allSections[j].Name
 		})
 	}
-
-	rpt := report.Report{Sections: allSections}
-	if err := writeReport(rpt, cfg.Output); err != nil {
-		return err
-	}
-	return checkExitCode(rpt, cfg.FailOn)
+	return allSections
 }
 
 // resolveLanguages turns the --language flag value (or auto-detect) into a
