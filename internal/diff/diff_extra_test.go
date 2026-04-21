@@ -141,6 +141,17 @@ func TestFilter_IncludesGoFile(t *testing.T) {
 	}
 }
 
+// TestFilter_NilIncludesAdmitsAll covers the `Includes == nil` default
+// branch: an empty filter must admit every path.
+func TestFilter_NilIncludesAdmitsAll(t *testing.T) {
+	var f Filter
+	for _, p := range []string{"foo.go", "bar.rs", "anything"} {
+		if !f.includes(p) {
+			t.Errorf("nil-Includes filter should admit %q", p)
+		}
+	}
+}
+
 func filenames(files []FileChange) []string {
 	out := make([]string, len(files))
 	for i, f := range files {

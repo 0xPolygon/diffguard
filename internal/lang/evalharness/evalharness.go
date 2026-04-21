@@ -243,33 +243,43 @@ func LoadExpectation(t *testing.T, fixtureDir string) (Expectation, bool) {
 // finding identity — not line-exact counts or percentages.
 func AssertMatches(t *testing.T, got report.Report, want Expectation) {
 	t.Helper()
-	if want.WorstSeverity != "" {
-		if got.WorstSeverity() != want.WorstSeverity {
-			dumpReport(t, got)
-			t.Errorf("WorstSeverity = %q, want %q", got.WorstSeverity(), want.WorstSeverity)
-		}
-	}
-
+	assertWorstSeverity(t, got, want.WorstSeverity)
 	for _, wantSec := range want.Sections {
-		sec := findSectionByPrefix(got, wantSec.Name)
-		if sec == nil {
-			t.Errorf("missing section starting with %q; got %v",
-				wantSec.Name, sectionNames(got))
-			continue
-		}
-		if wantSec.Severity != "" && sec.Severity != wantSec.Severity {
-			t.Errorf("section %q severity = %q, want %q (findings=%d)",
-				sec.Name, sec.Severity, wantSec.Severity, len(sec.Findings))
-		}
-		if wantSec.MustNotHaveFindings && len(sec.Findings) > 0 {
-			t.Errorf("section %q should have no findings, got %d:\n%s",
-				sec.Name, len(sec.Findings), dumpFindings(sec.Findings))
-		}
-		for _, wantF := range wantSec.MustHaveFindings {
-			if !anyMatchingFinding(sec.Findings, wantF) {
-				t.Errorf("section %q missing finding %+v; findings were:\n%s",
-					sec.Name, wantF, dumpFindings(sec.Findings))
-			}
+		assertSection(t, got, wantSec)
+	}
+}
+
+func assertWorstSeverity(t *testing.T, got report.Report, want report.Severity) {
+	t.Helper()
+	if want == "" {
+		return
+	}
+	if got.WorstSeverity() != want {
+		dumpReport(t, got)
+		t.Errorf("WorstSeverity = %q, want %q", got.WorstSeverity(), want)
+	}
+}
+
+func assertSection(t *testing.T, got report.Report, wantSec SectionExpectation) {
+	t.Helper()
+	sec := findSectionByPrefix(got, wantSec.Name)
+	if sec == nil {
+		t.Errorf("missing section starting with %q; got %v",
+			wantSec.Name, sectionNames(got))
+		return
+	}
+	if wantSec.Severity != "" && sec.Severity != wantSec.Severity {
+		t.Errorf("section %q severity = %q, want %q (findings=%d)",
+			sec.Name, sec.Severity, wantSec.Severity, len(sec.Findings))
+	}
+	if wantSec.MustNotHaveFindings && len(sec.Findings) > 0 {
+		t.Errorf("section %q should have no findings, got %d:\n%s",
+			sec.Name, len(sec.Findings), dumpFindings(sec.Findings))
+	}
+	for _, wantF := range wantSec.MustHaveFindings {
+		if !anyMatchingFinding(sec.Findings, wantF) {
+			t.Errorf("section %q missing finding %+v; findings were:\n%s",
+				sec.Name, wantF, dumpFindings(sec.Findings))
 		}
 	}
 }
@@ -296,27 +306,31 @@ func findSectionByPrefix(r report.Report, prefix string) *report.Section {
 // the fields wantF has set.
 func anyMatchingFinding(findings []report.Finding, wantF FindingExpectation) bool {
 	for _, f := range findings {
-		if wantF.File != "" && !pathMatches(f.File, wantF.File) {
-			continue
+		if findingMatches(f, wantF) {
+			return true
 		}
-		if wantF.Function != "" && f.Function != wantF.Function {
-			continue
-		}
-		if wantF.Severity != "" && f.Severity != wantF.Severity {
-			continue
-		}
-		if wantF.Operator != "" {
-			// Operator isn't a first-class field on report.Finding; mutation
-			// encodes it in Message as "SURVIVED: <desc> (<operator>)". Match
-			// by substring search so callers can pin operator names without
-			// knowing the message shape.
-			if !containsOperator(f.Message, wantF.Operator) {
-				continue
-			}
-		}
-		return true
 	}
 	return false
+}
+
+// findingMatches reports whether a single finding satisfies every non-zero
+// field of wantF. Operator isn't a first-class field on report.Finding;
+// mutation encodes it in Message as "SURVIVED: <desc> (<operator>)", so
+// that field is checked by substring search.
+func findingMatches(f report.Finding, wantF FindingExpectation) bool {
+	if wantF.File != "" && !pathMatches(f.File, wantF.File) {
+		return false
+	}
+	if wantF.Function != "" && f.Function != wantF.Function {
+		return false
+	}
+	if wantF.Severity != "" && f.Severity != wantF.Severity {
+		return false
+	}
+	if wantF.Operator != "" && !containsOperator(f.Message, wantF.Operator) {
+		return false
+	}
+	return true
 }
 
 // pathMatches accepts either an exact match or a basename match. Fixture
