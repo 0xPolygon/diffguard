@@ -9,9 +9,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/0xPolygon/diffguard/internal/lang"
 )
+
+// cancelWaitDelay bounds how long cmd.Wait() can block after the context
+// is canceled. Process-group kill (see configureProcessGroup) should
+// reap descendants immediately on unix; this is a cross-platform safety
+// net so pipes inherited by any orphan are force-closed.
+const cancelWaitDelay = 2 * time.Second
 
 // testRunnerImpl implements lang.TestRunner for TypeScript using the
 // project's configured test runner (vitest, jest, or `npm test`). Same
@@ -96,6 +103,8 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 	cmd.Dir = cfg.RepoPath
 	// CI=true suppresses interactive prompts from jest/vitest.
 	cmd.Env = append(os.Environ(), "CI=true")
+	configureProcessGroup(cmd)
+	cmd.WaitDelay = cancelWaitDelay
 	var combined bytes.Buffer
 	cmd.Stdout = &combined
 	cmd.Stderr = &combined
