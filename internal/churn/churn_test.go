@@ -204,3 +204,52 @@ func f() {}
 		t.Errorf("commits = %d, want 3", results[0].Commits)
 	}
 }
+
+// erroringScorer returns a canned error so the error-handling branches in
+// collectChurnResults and Analyze run.
+type erroringScorer struct{ err error }
+
+func (s erroringScorer) ScoreFile(absPath string, fc diff.FileChange) ([]lang.FunctionComplexity, error) {
+	return nil, s.err
+}
+
+// TestCollectChurnResults_PropagatesError asserts the scorer error escapes
+// the aggregation helper so the caller can react.
+func TestCollectChurnResults_PropagatesError(t *testing.T) {
+	files := []diff.FileChange{
+		{Path: "nope.go", Regions: []diff.ChangedRegion{{StartLine: 1, EndLine: 1}}},
+	}
+	_, err := collectChurnResults(t.TempDir(), files, map[string]int{"nope.go": 0},
+		erroringScorer{err: errTest})
+	if err == nil {
+		t.Fatal("expected scorer error to propagate")
+	}
+	if !containsAnalyzingPrefix(err.Error()) {
+		t.Errorf("error %q should be wrapped with file context", err)
+	}
+}
+
+// TestAnalyze_PropagatesScorerError pins that the top-level Analyze wraps
+// scorer errors rather than swallowing them — covers the `if err != nil`
+// branch in Analyze.
+func TestAnalyze_PropagatesScorerError(t *testing.T) {
+	d := &diff.Result{Files: []diff.FileChange{
+		{Path: "x.go", Regions: []diff.ChangedRegion{{StartLine: 1, EndLine: 1}}},
+	}}
+	_, err := Analyze(t.TempDir(), d, 10, erroringScorer{err: errTest})
+	if err == nil {
+		t.Fatal("expected Analyze to return scorer error")
+	}
+}
+
+// errTest is a sentinel error value the helpers above return.
+var errTest = testErr("scorer boom")
+
+type testErr string
+
+func (e testErr) Error() string { return string(e) }
+
+func containsAnalyzingPrefix(s string) bool {
+	prefix := "analyzing "
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}

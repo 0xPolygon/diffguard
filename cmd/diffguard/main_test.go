@@ -118,6 +118,106 @@ func TestResolveLanguages_Deduplicates(t *testing.T) {
 	}
 }
 
+// TestResolveLanguages_OnlyCommas fails with the "empty --language flag"
+// hard error when the value contains nothing but separators. This exercises
+// the final "len(out) == 0" guard that turns an empty parse into a visible
+// error rather than falling back to auto-detect.
+func TestResolveLanguages_OnlyCommas(t *testing.T) {
+	repo := initTempGoRepo(t)
+	_, err := resolveLanguages(repo, ", , ,")
+	if err == nil {
+		t.Fatal("expected error for empty --language value after splitting")
+	}
+	if !strings.Contains(err.Error(), "empty --language flag") {
+		t.Errorf("error = %q, want mention of 'empty --language flag'", err.Error())
+	}
+}
+
+// TestRegisteredNames_ListsGo verifies the helper returns at least "go"
+// (other languages are registered via blank-import and may or may not be
+// linked into this test binary).
+func TestRegisteredNames_ListsGo(t *testing.T) {
+	names := registeredNames()
+	if len(names) == 0 {
+		t.Fatal("expected at least one registered language")
+	}
+	found := false
+	for _, n := range names {
+		if n == "go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("registeredNames = %v, expected 'go'", names)
+	}
+}
+
+// TestRun_NoFilesInDiff_SingleLanguage drives run() with a --paths filter
+// that matches nothing. Exercises the "No <lang> files found." single-
+// language short-circuit — the len(d.Files)==0 branch that mutation tests
+// flagged as under-tested.
+func TestRun_NoFilesInDiff_SingleLanguage(t *testing.T) {
+	dir := t.TempDir()
+	// Write a go.mod so language auto-detection succeeds, but no .go files
+	// so the diff comes back empty.
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/empty\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		SkipMutation: true,
+		Output:       "text",
+		FailOn:       "none",
+		Paths:        ".", // refactoring mode skips git diff entirely
+	}
+	withSuppressedStdio(t, func() {
+		if err := run(dir, cfg); err != nil {
+			t.Errorf("run should succeed with empty diff, got %v", err)
+		}
+	})
+}
+
+// TestLanguageNoun_KnownLanguagesAndFallback covers every branch of the
+// switch: known language with special capitalization, plus the default
+// fallback for an unrecognized name. A stub Language lets us hit the
+// default without registering a real language implementation.
+func TestLanguageNoun_KnownLanguagesAndFallback(t *testing.T) {
+	got := languageNoun(stubLanguage("go"))
+	if got != "Go" {
+		t.Errorf("languageNoun(go) = %q, want Go", got)
+	}
+	got = languageNoun(stubLanguage("rust"))
+	if got != "Rust" {
+		t.Errorf("languageNoun(rust) = %q, want Rust", got)
+	}
+	got = languageNoun(stubLanguage("typescript"))
+	if got != "TypeScript" {
+		t.Errorf("languageNoun(typescript) = %q, want TypeScript", got)
+	}
+	// The fallback branch must echo the raw name.
+	got = languageNoun(stubLanguage("unknown"))
+	if got != "unknown" {
+		t.Errorf("languageNoun(unknown) = %q, want unknown (fallback)", got)
+	}
+}
+
+// stubLanguage implements just enough of lang.Language to exercise
+// languageNoun. Every accessor returns nil because languageNoun only
+// reads Name(); the test is in cmd/diffguard so we can't register it
+// globally anyway.
+type stubLanguage string
+
+func (s stubLanguage) Name() string                             { return string(s) }
+func (s stubLanguage) FileFilter() lang.FileFilter              { return lang.FileFilter{} }
+func (s stubLanguage) ComplexityCalculator() lang.ComplexityCalculator { return nil }
+func (s stubLanguage) FunctionExtractor() lang.FunctionExtractor       { return nil }
+func (s stubLanguage) ImportResolver() lang.ImportResolver             { return nil }
+func (s stubLanguage) ComplexityScorer() lang.ComplexityScorer         { return nil }
+func (s stubLanguage) MutantGenerator() lang.MutantGenerator           { return nil }
+func (s stubLanguage) MutantApplier() lang.MutantApplier               { return nil }
+func (s stubLanguage) AnnotationScanner() lang.AnnotationScanner       { return nil }
+func (s stubLanguage) TestRunner() lang.TestRunner                     { return nil }
+
 // initTempGoRepo creates a minimal git repo with a single committed Go
 // file on main, plus an additional file on HEAD so the diff has content.
 // Returns the absolute path to the repo.
