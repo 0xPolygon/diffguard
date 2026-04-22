@@ -206,6 +206,132 @@ func TestHandleHunkLine_PureDeletion(t *testing.T) {
 	}
 }
 
+func TestFilterPaths_DirectoryAndFile(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "miner", "sub"), 0755)
+	os.MkdirAll(filepath.Join(dir, "other"), 0755)
+	os.WriteFile(filepath.Join(dir, "miner", "a.go"), []byte("package miner\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "miner", "sub", "b.go"), []byte("package miner\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "other", "c.go"), []byte("package other\n"), 0644)
+
+	r := &Result{
+		BaseBranch: "develop",
+		Files: []FileChange{
+			{Path: "miner/a.go"},
+			{Path: "miner/sub/b.go"},
+			{Path: "other/c.go"},
+		},
+	}
+
+	filtered, err := FilterPaths(dir, r, []string{"miner", "other/c.go"})
+	if err != nil {
+		t.Fatalf("FilterPaths error: %v", err)
+	}
+
+	if filtered.BaseBranch != "develop" {
+		t.Fatalf("BaseBranch = %q, want develop", filtered.BaseBranch)
+	}
+	if len(filtered.Files) != 3 {
+		t.Fatalf("expected 3 matched files, got %d", len(filtered.Files))
+	}
+}
+
+func TestFilterPaths_AbsolutePathAndRoot(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "miner"), 0755)
+	os.WriteFile(filepath.Join(dir, "miner", "a.go"), []byte("package miner\n"), 0644)
+
+	r := &Result{
+		Files: []FileChange{
+			{Path: "miner/a.go"},
+		},
+	}
+
+	filtered, err := FilterPaths(dir, r, []string{filepath.Join(dir, "miner", "a.go")})
+	if err != nil {
+		t.Fatalf("FilterPaths(abs file) error: %v", err)
+	}
+	if len(filtered.Files) != 1 || filtered.Files[0].Path != "miner/a.go" {
+		t.Fatalf("unexpected absolute-path filter result: %+v", filtered.Files)
+	}
+
+	filtered, err = FilterPaths(dir, r, []string{"."})
+	if err != nil {
+		t.Fatalf("FilterPaths(.) error: %v", err)
+	}
+	if len(filtered.Files) != 1 {
+		t.Fatalf("expected root filter to keep all files, got %d", len(filtered.Files))
+	}
+}
+
+func TestFilterPaths_RejectsOutsideRepo(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := FilterPaths(dir, &Result{}, []string{"../outside"})
+	if err == nil {
+		t.Fatal("expected error for path outside repo")
+	}
+}
+
+func TestCompilePathScope_RejectsEmptyPath(t *testing.T) {
+	_, err := compilePathScope(t.TempDir(), "")
+	if err == nil {
+		t.Fatal("expected error for empty path")
+	}
+}
+
+func TestCompilePathScope_DetectsDirectoryAndNormalizesAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "miner", "sub"), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	scope, err := compilePathScope(dir, filepath.Join(dir, "miner"))
+	if err != nil {
+		t.Fatalf("compilePathScope(dir) error: %v", err)
+	}
+	if scope.path != "miner" {
+		t.Fatalf("scope.path = %q, want miner", scope.path)
+	}
+	if !scope.isDir {
+		t.Fatal("expected miner scope to be treated as directory")
+	}
+
+	scope, err = compilePathScope(dir, filepath.Join(dir, "miner", "sub"))
+	if err != nil {
+		t.Fatalf("compilePathScope(abs dir) error: %v", err)
+	}
+	if scope.path != filepath.Join("miner", "sub") {
+		t.Fatalf("scope.path = %q, want %q", scope.path, filepath.Join("miner", "sub"))
+	}
+	if !scope.isDir {
+		t.Fatal("expected nested scope to be treated as directory")
+	}
+}
+
+func TestMatchesAnyScope(t *testing.T) {
+	scopes := []pathScope{
+		{path: "miner", isDir: true},
+		{path: "other/c.go"},
+	}
+
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "miner", want: true},
+		{path: "miner/a.go", want: true},
+		{path: "other/c.go", want: true},
+		{path: "other/d.go", want: false},
+	}
+
+	for _, tt := range tests {
+		if got := matchesAnyScope(tt.path, scopes); got != tt.want {
+			t.Fatalf("matchesAnyScope(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
 func TestFileChange_IsNew(t *testing.T) {
 	newFile := FileChange{
 		Path:    "new.go",

@@ -34,6 +34,7 @@ func main() {
 	flag.StringVar(&cfg.FailOn, "fail-on", "warn", "Exit non-zero if thresholds breached: none, warn, all")
 	flag.StringVar(&cfg.BaseBranch, "base", "", "Base branch to diff against (default: auto-detect)")
 	flag.StringVar(&cfg.Paths, "paths", "", "Comma-separated files/dirs to analyze in full (refactoring mode); skips git diff")
+	flag.StringVar(&cfg.IncludePaths, "include-paths", "", "Comma-separated files/dirs to restrict diff mode to after git diff")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -74,9 +75,14 @@ type Config struct {
 	FailOn                string
 	BaseBranch            string
 	Paths                 string
+	IncludePaths          string
 }
 
 func run(repoPath string, cfg Config) error {
+	if err := validateConfig(cfg); err != nil {
+		return err
+	}
+
 	d, err := loadFiles(repoPath, cfg)
 	if err != nil {
 		return err
@@ -102,11 +108,7 @@ func run(repoPath string, cfg Config) error {
 }
 
 func announceRun(d *diff.Result, cfg Config) {
-	if cfg.Paths != "" {
-		fmt.Fprintf(os.Stderr, "Analyzing %d Go files (refactoring mode)...\n", len(d.Files))
-	} else {
-		fmt.Fprintf(os.Stderr, "Analyzing %d changed Go files against %s...\n", len(d.Files), cfg.BaseBranch)
-	}
+	fmt.Fprintln(os.Stderr, announceMessage(len(d.Files), cfg))
 }
 
 func runAnalyses(repoPath string, d *diff.Result, cfg Config) ([]report.Section, error) {
@@ -182,19 +184,77 @@ func checkExitCode(r report.Report, failOn string) error {
 
 func loadFiles(repoPath string, cfg Config) (*diff.Result, error) {
 	if cfg.Paths != "" {
-		paths := strings.Split(cfg.Paths, ",")
-		for i := range paths {
-			paths[i] = strings.TrimSpace(paths[i])
-		}
-		d, err := diff.CollectPaths(repoPath, paths)
-		if err != nil {
-			return nil, fmt.Errorf("collecting paths: %w", err)
-		}
-		return d, nil
+		return loadRefactoringFiles(repoPath, cfg.Paths)
 	}
+	return loadDiffFiles(repoPath, cfg)
+}
+
+func validateConfig(cfg Config) error {
+	if cfg.Paths != "" && cfg.BaseBranch != "" {
+		return fmt.Errorf("--paths and --base are mutually exclusive; use --include-paths to scope diff mode")
+	}
+	if cfg.Paths != "" && cfg.IncludePaths != "" {
+		return fmt.Errorf("--paths and --include-paths are mutually exclusive")
+	}
+	return nil
+}
+
+func parsePathList(raw, flagName string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	paths := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			paths = append(paths, part)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("--%s requires at least one path", flagName)
+	}
+	return paths, nil
+}
+
+func announceMessage(fileCount int, cfg Config) string {
+	if cfg.Paths != "" {
+		return fmt.Sprintf("Analyzing %d Go files (refactoring mode)...", fileCount)
+	}
+	if cfg.IncludePaths != "" {
+		return fmt.Sprintf("Analyzing %d changed Go files against %s (filtered to %s)...", fileCount, cfg.BaseBranch, cfg.IncludePaths)
+	}
+	return fmt.Sprintf("Analyzing %d changed Go files against %s...", fileCount, cfg.BaseBranch)
+}
+
+func loadRefactoringFiles(repoPath, rawPaths string) (*diff.Result, error) {
+	paths, err := parsePathList(rawPaths, "paths")
+	if err != nil {
+		return nil, err
+	}
+	d, err := diff.CollectPaths(repoPath, paths)
+	if err != nil {
+		return nil, fmt.Errorf("collecting paths: %w", err)
+	}
+	return d, nil
+}
+
+func loadDiffFiles(repoPath string, cfg Config) (*diff.Result, error) {
 	d, err := diff.Parse(repoPath, cfg.BaseBranch)
 	if err != nil {
 		return nil, fmt.Errorf("parsing diff: %w", err)
+	}
+	return filterDiffFiles(repoPath, d, cfg.IncludePaths)
+}
+
+func filterDiffFiles(repoPath string, d *diff.Result, rawPaths string) (*diff.Result, error) {
+	if rawPaths == "" {
+		return d, nil
+	}
+	paths, err := parsePathList(rawPaths, "include-paths")
+	if err != nil {
+		return nil, err
+	}
+	d, err = diff.FilterPaths(repoPath, d, paths)
+	if err != nil {
+		return nil, fmt.Errorf("filtering paths: %w", err)
 	}
 	return d, nil
 }

@@ -38,6 +38,9 @@ diffguard /path/to/repo
 # Specify a base branch
 diffguard --base main /path/to/repo
 
+# Restrict diff mode to a subtree
+diffguard --base develop --include-paths miner/ /path/to/repo
+
 # Refactoring mode: analyze entire files/dirs (no diff required)
 diffguard --paths internal/foo/bar.go /path/to/repo
 diffguard --paths internal/foo/,internal/bar/ /path/to/repo
@@ -61,9 +64,9 @@ diffguard \
 
 ### Modes
 
-**Diff mode (default):** Analyzes only the regions changed between `HEAD` and the base branch. Use this as a CI gate for PRs.
+**Diff mode (default):** Analyzes only the regions changed between `HEAD` and the base branch. Use this as a CI gate for PRs. Add `--include-paths` to limit diff mode to specific files or directories after the git diff is computed.
 
-**Refactoring mode (`--paths`):** Analyzes the full content of the specified files or directories, ignoring git diff entirely. Use this when iterating on an existing file's quality without a base to compare against.
+**Refactoring mode (`--paths`):** Analyzes the full content of the specified files or directories, ignoring git diff entirely. Use this when iterating on an existing file's quality without a base to compare against. `--paths` is mutually exclusive with `--base` and `--include-paths`.
 
 ## What It Measures
 
@@ -158,6 +161,7 @@ diffguard [flags] <repo-path>
 
 Flags:
   --base string                   Base branch to diff against (default: auto-detect)
+  --include-paths string          Comma-separated files/dirs to restrict diff mode to after git diff
   --paths string                  Comma-separated files/dirs to analyze in full (refactoring mode); skips git diff
   --complexity-threshold int      Maximum cognitive complexity per function (default 10)
   --function-size-threshold int   Maximum lines per function (default 50)

@@ -126,6 +126,99 @@ func CollectPaths(repoPath string, paths []string) (*Result, error) {
 	return &Result{Files: files}, nil
 }
 
+// FilterPaths restricts an existing Result to files matching the given file or
+// directory paths. Directory inputs match recursively.
+func FilterPaths(repoPath string, r *Result, paths []string) (*Result, error) {
+	scopes, err := compilePathScopes(repoPath, paths)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := &Result{BaseBranch: r.BaseBranch}
+	for _, f := range r.Files {
+		if matchesAnyScope(f.Path, scopes) {
+			filtered.Files = append(filtered.Files, f)
+		}
+	}
+	return filtered, nil
+}
+
+type pathScope struct {
+	path  string
+	isDir bool
+}
+
+func compilePathScopes(repoPath string, paths []string) ([]pathScope, error) {
+	scopes := make([]pathScope, 0, len(paths))
+	for _, raw := range paths {
+		scope, err := compilePathScope(repoPath, raw)
+		if err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes, nil
+}
+
+func compilePathScope(repoPath, raw string) (pathScope, error) {
+	if raw == "" {
+		return pathScope{}, fmt.Errorf("empty path filter")
+	}
+
+	isDir := strings.HasSuffix(raw, "/") || strings.HasSuffix(raw, string(filepath.Separator))
+	normalized := raw
+	if filepath.IsAbs(raw) {
+		rel, err := filepath.Rel(repoPath, raw)
+		if err != nil {
+			return pathScope{}, err
+		}
+		normalized = rel
+	}
+	normalized = filepath.Clean(normalized)
+	if !isRepoRelative(normalized) {
+		return pathScope{}, fmt.Errorf("path %q is outside repo", raw)
+	}
+
+	if info, err := os.Stat(filepath.Join(repoPath, normalized)); err == nil && info.IsDir() {
+		isDir = true
+	}
+
+	return pathScope{path: normalized, isDir: isDir}, nil
+}
+
+func isRepoRelative(path string) bool {
+	if path == "." {
+		return true
+	}
+	if path == ".." {
+		return false
+	}
+	return !strings.HasPrefix(path, ".."+string(filepath.Separator))
+}
+
+func matchesAnyScope(path string, scopes []pathScope) bool {
+	for _, scope := range scopes {
+		if matchesScope(path, scope) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesScope(path string, scope pathScope) bool {
+	if scope.path == "." {
+		return true
+	}
+	if scope.isDir {
+		return matchesDirScope(path, scope.path)
+	}
+	return path == scope.path
+}
+
+func matchesDirScope(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
 func collectPath(repoPath, p string, files *[]FileChange, seen map[string]bool) error {
 	absPath := p
 	if !filepath.IsAbs(p) {
