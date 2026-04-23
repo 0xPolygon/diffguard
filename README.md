@@ -45,6 +45,9 @@ diffguard --paths internal/foo/,internal/bar/ /path/to/repo
 # Skip mutation testing (fastest)
 diffguard --skip-mutation /path/to/repo
 
+# Generated files are skipped by default; disable that if needed
+diffguard --skip-generated=false /path/to/repo
+
 # Or sample a subset of mutants for faster-but-still-useful signal
 diffguard --mutation-sample-rate 20 /path/to/repo
 
@@ -64,6 +67,8 @@ diffguard \
 **Diff mode (default):** Analyzes only the regions changed between `HEAD` and the base branch. Use this as a CI gate for PRs.
 
 **Refactoring mode (`--paths`):** Analyzes the full content of the specified files or directories, ignoring git diff entirely. Use this when iterating on an existing file's quality without a base to compare against.
+
+**Generated-file skipping (`--skip-generated`):** Enabled by default. Files marked with a standard generated-code banner such as `Code generated ... DO NOT EDIT` are excluded before they reach any analyzer. Pass `--skip-generated=false` to include them.
 
 ## What It Measures
 
@@ -163,6 +168,7 @@ Flags:
   --function-size-threshold int   Maximum lines per function (default 50)
   --file-size-threshold int       Maximum lines per file (default 500)
   --skip-mutation                 Skip mutation testing
+  --skip-generated                Skip files marked as generated (for example `Code generated ... DO NOT EDIT`) (default true)
   --mutation-sample-rate float    Percentage of mutants to test, 0-100 (default 100)
   --test-timeout duration         Per-mutant go test timeout (default 30s)
   --test-pattern string           Pattern passed to `go test -run` for each mutant (scopes tests to speed up slow suites)
