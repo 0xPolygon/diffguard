@@ -1,11 +1,13 @@
+// Package churn cross-references git log with per-function complexity scores
+// using a language-supplied lang.ComplexityScorer. The AST-level work lives
+// in the language back-end (for Go: goanalyzer/complexity.go); this file
+// owns the git log counting (which is language-agnostic) and the severity
+// derivation.
 package churn
 
 import (
 	"bufio"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -13,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/0xPolygon/diffguard/internal/diff"
+	"github.com/0xPolygon/diffguard/internal/lang"
 	"github.com/0xPolygon/diffguard/internal/report"
 )
 
@@ -26,10 +29,14 @@ type FunctionChurn struct {
 	Score      float64
 }
 
-// Analyze cross-references git log with cognitive complexity for changed functions.
-func Analyze(repoPath string, d *diff.Result, complexityThreshold int) (report.Section, error) {
+// Analyze cross-references git log with per-function complexity scores for
+// the diff's changed files.
+func Analyze(repoPath string, d *diff.Result, complexityThreshold int, scorer lang.ComplexityScorer) (report.Section, error) {
 	fileCommits := collectFileCommits(repoPath, d.Files)
-	results := collectChurnResults(repoPath, d.Files, fileCommits)
+	results, err := collectChurnResults(repoPath, d.Files, fileCommits, scorer)
+	if err != nil {
+		return report.Section{}, err
+	}
 	return buildSection(results, complexityThreshold), nil
 }
 
@@ -41,49 +48,37 @@ func collectFileCommits(repoPath string, files []diff.FileChange) map[string]int
 	return commits
 }
 
-func collectChurnResults(repoPath string, files []diff.FileChange, fileCommits map[string]int) []FunctionChurn {
+func collectChurnResults(repoPath string, files []diff.FileChange, fileCommits map[string]int, scorer lang.ComplexityScorer) ([]FunctionChurn, error) {
 	var results []FunctionChurn
 	for _, fc := range files {
-		results = append(results, analyzeFileChurn(repoPath, fc, fileCommits[fc.Path])...)
+		fnResults, err := analyzeFileChurn(repoPath, fc, fileCommits[fc.Path], scorer)
+		if err != nil {
+			return nil, fmt.Errorf("analyzing %s: %w", fc.Path, err)
+		}
+		results = append(results, fnResults...)
 	}
-	return results
+	return results, nil
 }
 
-func analyzeFileChurn(repoPath string, fc diff.FileChange, commits int) []FunctionChurn {
+func analyzeFileChurn(repoPath string, fc diff.FileChange, commits int, scorer lang.ComplexityScorer) ([]FunctionChurn, error) {
 	absPath := filepath.Join(repoPath, fc.Path)
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, absPath, nil, 0)
+	scores, err := scorer.ScoreFile(absPath, fc)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
-	var results []FunctionChurn
-	ast.Inspect(f, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
-		}
-
-		startLine := fset.Position(fn.Pos()).Line
-		endLine := fset.Position(fn.End()).Line
-
-		if !fc.OverlapsRange(startLine, endLine) {
-			return false
-		}
-
-		complexity := computeComplexity(fn.Body)
+	results := make([]FunctionChurn, 0, len(scores))
+	for _, s := range scores {
 		results = append(results, FunctionChurn{
-			File:       fc.Path,
-			Line:       startLine,
-			Name:       funcName(fn),
+			File:       s.File,
+			Line:       s.Line,
+			Name:       s.Name,
 			Commits:    commits,
-			Complexity: complexity,
-			Score:      float64(commits) * float64(complexity),
+			Complexity: s.Complexity,
+			Score:      float64(commits) * float64(s.Complexity),
 		})
-
-		return false
-	})
-	return results
+	}
+	return results, nil
 }
 
 // countFileCommits counts the total number of commits that touched a file.
@@ -100,50 +95,7 @@ func countFileCommits(repoPath, filePath string) int {
 	for scanner.Scan() {
 		count++
 	}
-
 	return count
-}
-
-// computeComplexity is a simplified cognitive complexity counter.
-func computeComplexity(body *ast.BlockStmt) int {
-	if body == nil {
-		return 0
-	}
-	var count int
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch n.(type) {
-		case *ast.IfStmt:
-			count++
-		case *ast.ForStmt, *ast.RangeStmt:
-			count++
-		case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
-			count++
-		case *ast.BinaryExpr:
-			bin := n.(*ast.BinaryExpr)
-			if bin.Op == token.LAND || bin.Op == token.LOR {
-				count++
-			}
-		}
-		return true
-	})
-	return count
-}
-
-func funcName(fn *ast.FuncDecl) string {
-	if fn.Recv != nil && len(fn.Recv.List) > 0 {
-		recv := fn.Recv.List[0]
-		var typeName string
-		switch t := recv.Type.(type) {
-		case *ast.StarExpr:
-			if ident, ok := t.X.(*ast.Ident); ok {
-				typeName = ident.Name
-			}
-		case *ast.Ident:
-			typeName = t.Name
-		}
-		return fmt.Sprintf("(%s).%s", typeName, fn.Name.Name)
-	}
-	return fn.Name.Name
 }
 
 func collectChurnFindings(results []FunctionChurn, complexityThreshold int) ([]report.Finding, int) {

@@ -1,4 +1,4 @@
-package mutation
+package goanalyzer
 
 import (
 	"fmt"
@@ -7,20 +7,26 @@ import (
 	"go/token"
 
 	"github.com/0xPolygon/diffguard/internal/diff"
+	"github.com/0xPolygon/diffguard/internal/lang"
 )
 
-// generateMutants parses a file and creates mutants for changed regions.
-// Lines disabled via mutator-disable-* annotations are skipped.
-func generateMutants(absPath string, fc diff.FileChange) ([]Mutant, error) {
+// mutantGeneratorImpl implements lang.MutantGenerator for Go. The generation
+// strategy is unchanged from the pre-split internal/mutation/generate.go —
+// the only difference is that mutants are now returned as []lang.MutantSite
+// so the mutation orchestrator can stay language-agnostic.
+type mutantGeneratorImpl struct{}
+
+// GenerateMutants re-parses the file (with comments so annotation scanning
+// can share the same AST) and emits a MutantSite for each operator that
+// applies on a changed, non-disabled line.
+func (mutantGeneratorImpl) GenerateMutants(absPath string, fc diff.FileChange, disabled map[int]bool) ([]lang.MutantSite, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, absPath, nil, parser.ParseComments)
 	if err != nil {
 		return nil, err
 	}
 
-	disabled := scanAnnotations(fset, f)
-	var mutants []Mutant
-
+	var mutants []lang.MutantSite
 	ast.Inspect(f, func(n ast.Node) bool {
 		if n == nil {
 			return true
@@ -32,11 +38,10 @@ func generateMutants(absPath string, fc diff.FileChange) ([]Mutant, error) {
 		mutants = append(mutants, mutantsFor(fc.Path, line, n)...)
 		return true
 	})
-
 	return mutants, nil
 }
 
-func mutantsFor(file string, line int, n ast.Node) []Mutant {
+func mutantsFor(file string, line int, n ast.Node) []lang.MutantSite {
 	switch node := n.(type) {
 	case *ast.BinaryExpr:
 		return binaryMutants(file, line, node)
@@ -54,8 +59,11 @@ func mutantsFor(file string, line int, n ast.Node) []Mutant {
 	return nil
 }
 
-// binaryMutants generates mutations for binary expressions.
-func binaryMutants(file string, line int, expr *ast.BinaryExpr) []Mutant {
+// binaryMutants covers the conditional_boundary / negate_conditional /
+// math_operator operators. Each source operator maps to a single canonical
+// replacement; a surviving mutant should never be ambiguous about what
+// "the mutation" was.
+func binaryMutants(file string, line int, expr *ast.BinaryExpr) []lang.MutantSite {
 	replacements := map[token.Token][]token.Token{
 		token.GTR: {token.GEQ},
 		token.LSS: {token.LEQ},
@@ -74,31 +82,28 @@ func binaryMutants(file string, line int, expr *ast.BinaryExpr) []Mutant {
 		return nil
 	}
 
-	var mutants []Mutant
+	var mutants []lang.MutantSite
 	for _, newOp := range targets {
-		mutants = append(mutants, Mutant{
+		mutants = append(mutants, lang.MutantSite{
 			File:        file,
 			Line:        line,
 			Description: fmt.Sprintf("%s -> %s", expr.Op, newOp),
 			Operator:    operatorName(expr.Op, newOp),
 		})
 	}
-
 	return mutants
 }
 
 // boolMutants generates true <-> false mutations.
-func boolMutants(file string, line int, ident *ast.Ident) []Mutant {
+func boolMutants(file string, line int, ident *ast.Ident) []lang.MutantSite {
 	if ident.Name != "true" && ident.Name != "false" {
 		return nil
 	}
-
 	newVal := "true"
 	if ident.Name == "true" {
 		newVal = "false"
 	}
-
-	return []Mutant{{
+	return []lang.MutantSite{{
 		File:        file,
 		Line:        line,
 		Description: fmt.Sprintf("%s -> %s", ident.Name, newVal),
@@ -111,16 +116,15 @@ func boolMutants(file string, line int, ident *ast.Ident) []Mutant {
 // Returns whose every result is already the literal identifier `nil` are
 // skipped: the zero-value mutation rewrites each result to `nil`, producing
 // an identical AST and therefore an equivalent mutant that can never be
-// killed. Including them only adds noise to the score.
-func returnMutants(file string, line int, ret *ast.ReturnStmt) []Mutant {
+// killed.
+func returnMutants(file string, line int, ret *ast.ReturnStmt) []lang.MutantSite {
 	if len(ret.Results) == 0 {
 		return nil
 	}
 	if allLiteralNil(ret.Results) {
 		return nil
 	}
-
-	return []Mutant{{
+	return []lang.MutantSite{{
 		File:        file,
 		Line:        line,
 		Description: "replace return values with zero values",
@@ -128,8 +132,6 @@ func returnMutants(file string, line int, ret *ast.ReturnStmt) []Mutant {
 	}}
 }
 
-// allLiteralNil reports whether every expression is the bare identifier
-// `nil`. See returnMutants for why this suppresses mutant generation.
 func allLiteralNil(exprs []ast.Expr) bool {
 	for _, e := range exprs {
 		ident, ok := e.(*ast.Ident)
@@ -141,7 +143,7 @@ func allLiteralNil(exprs []ast.Expr) bool {
 }
 
 // incdecMutants swaps ++ with -- and vice versa.
-func incdecMutants(file string, line int, stmt *ast.IncDecStmt) []Mutant {
+func incdecMutants(file string, line int, stmt *ast.IncDecStmt) []lang.MutantSite {
 	var newTok token.Token
 	switch stmt.Tok {
 	case token.INC:
@@ -151,7 +153,7 @@ func incdecMutants(file string, line int, stmt *ast.IncDecStmt) []Mutant {
 	default:
 		return nil
 	}
-	return []Mutant{{
+	return []lang.MutantSite{{
 		File:        file,
 		Line:        line,
 		Description: fmt.Sprintf("%s -> %s", stmt.Tok, newTok),
@@ -160,11 +162,11 @@ func incdecMutants(file string, line int, stmt *ast.IncDecStmt) []Mutant {
 }
 
 // ifBodyMutants empties the body of an if statement.
-func ifBodyMutants(file string, line int, stmt *ast.IfStmt) []Mutant {
+func ifBodyMutants(file string, line int, stmt *ast.IfStmt) []lang.MutantSite {
 	if stmt.Body == nil || len(stmt.Body.List) == 0 {
 		return nil
 	}
-	return []Mutant{{
+	return []lang.MutantSite{{
 		File:        file,
 		Line:        line,
 		Description: "remove if body",
@@ -173,11 +175,11 @@ func ifBodyMutants(file string, line int, stmt *ast.IfStmt) []Mutant {
 }
 
 // exprStmtMutants deletes a bare function-call statement (discards side effects).
-func exprStmtMutants(file string, line int, stmt *ast.ExprStmt) []Mutant {
+func exprStmtMutants(file string, line int, stmt *ast.ExprStmt) []lang.MutantSite {
 	if _, ok := stmt.X.(*ast.CallExpr); !ok {
 		return nil
 	}
-	return []Mutant{{
+	return []lang.MutantSite{{
 		File:        file,
 		Line:        line,
 		Description: "remove call statement",

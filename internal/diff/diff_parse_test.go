@@ -29,7 +29,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 
 func TestParse_NotGitRepo(t *testing.T) {
 	dir := t.TempDir()
-	_, err := Parse(dir, "main")
+	_, err := Parse(dir, "main", goFilter())
 	if err == nil {
 		t.Fatal("expected error when running Parse outside a git repo")
 	}
@@ -47,7 +47,7 @@ func TestParse_MissingBaseBranch(t *testing.T) {
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "commit", "-q", "-m", "init")
 
-	_, err := Parse(dir, "no-such-branch")
+	_, err := Parse(dir, "no-such-branch", goFilter())
 	if err == nil {
 		t.Fatal("expected error for nonexistent base branch")
 	}
@@ -71,7 +71,7 @@ func TestParse_SuccessDetectsChangedGoFile(t *testing.T) {
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "commit", "-q", "-m", "add new.go")
 
-	result, err := Parse(dir, "main")
+	result, err := Parse(dir, "main", goFilter())
 	if err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestParse_IgnoresTestFiles(t *testing.T) {
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "commit", "-q", "-m", "add test")
 
-	result, err := Parse(dir, "main")
+	result, err := Parse(dir, "main", goFilter())
 	if err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}

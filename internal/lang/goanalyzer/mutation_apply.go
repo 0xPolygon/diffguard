@@ -1,4 +1,4 @@
-package mutation
+package goanalyzer
 
 import (
 	"bytes"
@@ -7,30 +7,41 @@ import (
 	"go/printer"
 	"go/token"
 	"strings"
+
+	"github.com/0xPolygon/diffguard/internal/lang"
 )
 
-// applyMutation re-parses the file and applies the specific mutation.
-func applyMutation(absPath string, m *Mutant) []byte {
+// mutantApplierImpl implements lang.MutantApplier for Go by re-parsing the
+// original file, walking to the line of the mutation, and mutating the
+// matching AST node. The caller gets the rendered source bytes back — the
+// mutation orchestrator is responsible for writing them to a temp file and
+// invoking `go test -overlay`.
+type mutantApplierImpl struct{}
+
+// ApplyMutation returns mutated source bytes, or (nil, nil) if the mutation
+// can't be applied (parse error, line/operator mismatch, etc.). Returning a
+// nil-without-error is the signal the orchestrator expects for "skip this
+// mutant" — matching the pre-split behavior.
+func (mutantApplierImpl) ApplyMutation(absPath string, site lang.MutantSite) ([]byte, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, absPath, nil, parser.ParseComments)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	var applied bool
-	if m.Operator == "statement_deletion" {
-		applied = applyStatementDeletion(fset, f, m)
+	if site.Operator == "statement_deletion" {
+		applied = applyStatementDeletion(fset, f, site)
 	} else {
-		applied = applyMutationToAST(fset, f, m)
+		applied = applyMutationToAST(fset, f, site)
 	}
-
 	if !applied {
-		return nil
+		return nil, nil
 	}
-	return renderFile(fset, f)
+	return renderFile(fset, f), nil
 }
 
-func applyMutationToAST(fset *token.FileSet, f *ast.File, m *Mutant) bool {
+func applyMutationToAST(fset *token.FileSet, f *ast.File, m lang.MutantSite) bool {
 	applied := false
 	ast.Inspect(f, func(n ast.Node) bool {
 		if applied || n == nil {
@@ -45,9 +56,10 @@ func applyMutationToAST(fset *token.FileSet, f *ast.File, m *Mutant) bool {
 	return applied
 }
 
-// applyStatementDeletion needs the containing block to replace a statement,
-// so it walks BlockStmts instead of the flat ast.Inspect used for other ops.
-func applyStatementDeletion(fset *token.FileSet, f *ast.File, m *Mutant) bool {
+// applyStatementDeletion walks BlockStmts instead of the flat ast.Inspect
+// used for other operators because it needs the containing block to replace
+// a statement.
+func applyStatementDeletion(fset *token.FileSet, f *ast.File, m lang.MutantSite) bool {
 	applied := false
 	ast.Inspect(f, func(n ast.Node) bool {
 		if applied {
@@ -66,7 +78,7 @@ func applyStatementDeletion(fset *token.FileSet, f *ast.File, m *Mutant) bool {
 	return applied
 }
 
-func tryDeleteInBlock(fset *token.FileSet, block *ast.BlockStmt, m *Mutant) bool {
+func tryDeleteInBlock(fset *token.FileSet, block *ast.BlockStmt, m lang.MutantSite) bool {
 	for i, stmt := range block.List {
 		if fset.Position(stmt.Pos()).Line != m.Line {
 			continue
@@ -80,7 +92,7 @@ func tryDeleteInBlock(fset *token.FileSet, block *ast.BlockStmt, m *Mutant) bool
 	return false
 }
 
-func tryApplyMutation(n ast.Node, m *Mutant) bool {
+func tryApplyMutation(n ast.Node, m lang.MutantSite) bool {
 	switch m.Operator {
 	case "conditional_boundary", "negate_conditional", "math_operator":
 		return applyBinaryMutation(n, m)
@@ -96,7 +108,7 @@ func tryApplyMutation(n ast.Node, m *Mutant) bool {
 	return false
 }
 
-func applyBinaryMutation(n ast.Node, m *Mutant) bool {
+func applyBinaryMutation(n ast.Node, m lang.MutantSite) bool {
 	expr, ok := n.(*ast.BinaryExpr)
 	if !ok {
 		return false
@@ -114,7 +126,7 @@ func applyBinaryMutation(n ast.Node, m *Mutant) bool {
 	return true
 }
 
-func applyBoolMutation(n ast.Node, m *Mutant) bool {
+func applyBoolMutation(n ast.Node, m lang.MutantSite) bool {
 	ident, ok := n.(*ast.Ident)
 	if !ok || (ident.Name != "true" && ident.Name != "false") {
 		return false
@@ -163,14 +175,13 @@ func applyBranchRemoval(n ast.Node) bool {
 	return true
 }
 
-// parseMutationOp parses a mutant description of the form "X -> Y" into
-// the (from, to) operator pair. Either token is ILLEGAL if parsing fails.
+// parseMutationOp parses a mutant description of the form "X -> Y" into the
+// (from, to) operator pair. Either token is ILLEGAL if parsing fails.
 func parseMutationOp(desc string) (from, to token.Token) {
 	parts := strings.Split(desc, " -> ")
 	if len(parts) != 2 {
 		return token.ILLEGAL, token.ILLEGAL
 	}
-
 	opMap := map[string]token.Token{
 		">": token.GTR, ">=": token.GEQ,
 		"<": token.LSS, "<=": token.LEQ,
@@ -178,7 +189,6 @@ func parseMutationOp(desc string) (from, to token.Token) {
 		"+": token.ADD, "-": token.SUB,
 		"*": token.MUL, "/": token.QUO,
 	}
-
 	fromOp, okFrom := opMap[parts[0]]
 	toOp, okTo := opMap[parts[1]]
 	if !okFrom || !okTo {

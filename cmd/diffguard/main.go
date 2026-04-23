@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/0xPolygon/diffguard/internal/complexity"
 	"github.com/0xPolygon/diffguard/internal/deps"
 	"github.com/0xPolygon/diffguard/internal/diff"
+	"github.com/0xPolygon/diffguard/internal/lang"
+	_ "github.com/0xPolygon/diffguard/internal/lang/goanalyzer"
 	"github.com/0xPolygon/diffguard/internal/mutation"
 	"github.com/0xPolygon/diffguard/internal/report"
 	"github.com/0xPolygon/diffguard/internal/sizes"
@@ -34,6 +37,7 @@ func main() {
 	flag.StringVar(&cfg.FailOn, "fail-on", "warn", "Exit non-zero if thresholds breached: none, warn, all")
 	flag.StringVar(&cfg.BaseBranch, "base", "", "Base branch to diff against (default: auto-detect)")
 	flag.StringVar(&cfg.Paths, "paths", "", "Comma-separated files/dirs to analyze in full (refactoring mode); skips git diff")
+	flag.StringVar(&cfg.Language, "language", "", "Comma-separated languages to analyze (e.g. 'go' or 'rust,typescript'); empty = auto-detect")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -74,70 +78,219 @@ type Config struct {
 	FailOn                string
 	BaseBranch            string
 	Paths                 string
+	Language              string
 }
 
+// langResult bundles the per-language analysis output so the orchestrator
+// can merge sections after every language has been processed.
+type langResult struct {
+	lang     lang.Language
+	diff     *diff.Result
+	sections []report.Section
+}
+
+// run resolves the language set (explicit --language flag or auto-detect via
+// manifest scan), then invokes the analyzer pipeline once per language and
+// merges the resulting sections into a single report.
 func run(repoPath string, cfg Config) error {
-	d, err := loadFiles(repoPath, cfg)
+	languages, err := resolveLanguages(repoPath, cfg.Language)
 	if err != nil {
 		return err
 	}
 
-	if len(d.Files) == 0 {
-		fmt.Println("No Go files found.")
+	results, done, err := collectLanguageResults(repoPath, cfg, languages)
+	if err != nil || done {
+		return err
+	}
+	if len(results) == 0 {
+		fmt.Printf("No %s files found.\n", languageNoun(languages[0]))
 		return nil
 	}
 
-	announceRun(d, cfg)
+	rpt := report.Report{Sections: mergeLanguageSections(results)}
+	if err := writeReport(rpt, cfg.Output); err != nil {
+		return err
+	}
+	return checkExitCode(rpt, cfg.FailOn)
+}
 
-	sections, err := runAnalyses(repoPath, d, cfg)
+// collectLanguageResults runs the analyzer pipeline once per language and
+// returns the per-language sections. `done` is true when a single-language
+// run discovered no files (the legacy byte-identical "No X files found."
+// message has been emitted and run() should exit without writing a report).
+func collectLanguageResults(repoPath string, cfg Config, languages []lang.Language) ([]langResult, bool, error) {
+	var results []langResult
+	for _, l := range languages {
+		r, skip, done, err := analyzeLanguage(repoPath, cfg, l, len(languages))
+		if err != nil {
+			return nil, false, err
+		}
+		if done {
+			return nil, true, nil
+		}
+		if skip {
+			continue
+		}
+		results = append(results, r)
+	}
+	return results, false, nil
+}
+
+// analyzeLanguage runs the pipeline for one language. Returns:
+//   - (result, false, false, nil) when analysis ran and produced sections.
+//   - (_, true, false, nil)       when the language contributed no files in a
+//     multi-language run (skipped, a status line is emitted to stderr).
+//   - (_, _, true, nil)           when a single-language run found no files
+//     (the caller should exit without writing a report — legacy UX).
+//   - (_, _, _, err)              on pipeline failure.
+func analyzeLanguage(repoPath string, cfg Config, l lang.Language, numLanguages int) (langResult, bool, bool, error) {
+	d, err := loadFiles(repoPath, cfg, diffFilter(l))
 	if err != nil {
-		return err
+		return langResult{}, false, false, err
 	}
-
-	r := report.Report{Sections: sections}
-	if err := writeReport(r, cfg.Output); err != nil {
-		return err
+	if len(d.Files) == 0 {
+		if numLanguages == 1 {
+			fmt.Printf("No %s files found.\n", languageNoun(l))
+			return langResult{}, false, true, nil
+		}
+		fmt.Fprintf(os.Stderr, "No %s files found; skipping.\n", languageNoun(l))
+		return langResult{}, true, false, nil
 	}
-	return checkExitCode(r, cfg.FailOn)
+	announceRun(d, cfg, l, numLanguages)
+	sections, err := runAnalyses(repoPath, d, cfg, l)
+	if err != nil {
+		return langResult{}, false, false, err
+	}
+	return langResult{lang: l, diff: d, sections: sections}, false, false, nil
 }
 
-func announceRun(d *diff.Result, cfg Config) {
+// mergeLanguageSections flattens per-language sections into a single list.
+// In a multi-language run each section name is suffixed with `[<lang>]` and
+// the combined list is sorted lexicographically for stable ordering.
+func mergeLanguageSections(results []langResult) []report.Section {
+	multi := len(results) > 1
+	var allSections []report.Section
+	for _, r := range results {
+		for _, s := range r.sections {
+			if multi {
+				s.Name = fmt.Sprintf("%s [%s]", s.Name, r.lang.Name())
+			}
+			allSections = append(allSections, s)
+		}
+	}
+	if multi {
+		sort.SliceStable(allSections, func(i, j int) bool {
+			return allSections[i].Name < allSections[j].Name
+		})
+	}
+	return allSections
+}
+
+// resolveLanguages turns the --language flag value (or auto-detect) into a
+// concrete list of Language implementations. Unknown names in the flag are
+// a hard error; an empty detection set is a hard error with a suggestion
+// to pass --language.
+func resolveLanguages(repoPath, flagValue string) ([]lang.Language, error) {
+	if flagValue == "" {
+		langs := lang.Detect(repoPath)
+		if len(langs) == 0 {
+			return nil, fmt.Errorf("no supported language detected; pass --language to override (see --help)")
+		}
+		return langs, nil
+	}
+
+	var out []lang.Language
+	seen := map[string]bool{}
+	for _, name := range strings.Split(flagValue, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		l, ok := lang.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("unknown language %q (registered: %s)", name, strings.Join(registeredNames(), ", "))
+		}
+		out = append(out, l)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("empty --language flag")
+	}
+	// Sort for determinism, matching lang.All()/Detect() behavior.
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out, nil
+}
+
+func registeredNames() []string {
+	all := lang.All()
+	names := make([]string, len(all))
+	for i, l := range all {
+		names[i] = l.Name()
+	}
+	return names
+}
+
+// languageNoun returns the human-friendly noun for status messages. For Go
+// we preserve the legacy capitalized form ("No Go files found.") so
+// single-language output stays byte-identical.
+func languageNoun(l lang.Language) string {
+	switch l.Name() {
+	case "go":
+		return "Go"
+	case "rust":
+		return "Rust"
+	case "typescript":
+		return "TypeScript"
+	default:
+		return l.Name()
+	}
+}
+
+func announceRun(d *diff.Result, cfg Config, l lang.Language, numLanguages int) {
+	noun := languageNoun(l)
+	// For a single-language run, preserve the legacy message exactly:
+	// "Analyzing N changed Go files against main..." / refactoring-mode
+	// phrasing. Multi-language adds a bracketed suffix.
+	suffix := ""
+	if numLanguages > 1 {
+		suffix = fmt.Sprintf(" [%s]", l.Name())
+	}
 	if cfg.Paths != "" {
-		fmt.Fprintf(os.Stderr, "Analyzing %d Go files (refactoring mode)...\n", len(d.Files))
+		fmt.Fprintf(os.Stderr, "Analyzing %d %s files (refactoring mode)%s...\n", len(d.Files), noun, suffix)
 	} else {
-		fmt.Fprintf(os.Stderr, "Analyzing %d changed Go files against %s...\n", len(d.Files), cfg.BaseBranch)
+		fmt.Fprintf(os.Stderr, "Analyzing %d changed %s files against %s%s...\n", len(d.Files), noun, cfg.BaseBranch, suffix)
 	}
 }
 
-func runAnalyses(repoPath string, d *diff.Result, cfg Config) ([]report.Section, error) {
+func runAnalyses(repoPath string, d *diff.Result, cfg Config, l lang.Language) ([]report.Section, error) {
 	var sections []report.Section
 
-	complexitySection, err := complexity.Analyze(repoPath, d, cfg.ComplexityThreshold)
+	complexitySection, err := complexity.Analyze(repoPath, d, cfg.ComplexityThreshold, l.ComplexityCalculator())
 	if err != nil {
 		return nil, fmt.Errorf("complexity analysis: %w", err)
 	}
 	sections = append(sections, complexitySection)
 
-	sizesSection, err := sizes.Analyze(repoPath, d, cfg.FunctionSizeThreshold, cfg.FileSizeThreshold)
+	sizesSection, err := sizes.Analyze(repoPath, d, cfg.FunctionSizeThreshold, cfg.FileSizeThreshold, l.FunctionExtractor())
 	if err != nil {
 		return nil, fmt.Errorf("size analysis: %w", err)
 	}
 	sections = append(sections, sizesSection)
 
-	depsSection, err := deps.Analyze(repoPath, d)
+	depsSection, err := deps.Analyze(repoPath, d, l.ImportResolver())
 	if err != nil {
 		return nil, fmt.Errorf("dependency analysis: %w", err)
 	}
 	sections = append(sections, depsSection)
 
-	churnSection, err := churn.Analyze(repoPath, d, cfg.ComplexityThreshold)
+	churnSection, err := churn.Analyze(repoPath, d, cfg.ComplexityThreshold, l.ComplexityScorer())
 	if err != nil {
 		return nil, fmt.Errorf("churn analysis: %w", err)
 	}
 	sections = append(sections, churnSection)
 
 	if !cfg.SkipMutation {
-		mutationSection, err := mutation.Analyze(repoPath, d, mutation.Options{
+		mutationSection, err := mutation.Analyze(repoPath, d, l, mutation.Options{
 			SampleRate:     cfg.MutationSampleRate,
 			TestTimeout:    cfg.TestTimeout,
 			TestPattern:    cfg.TestPattern,
@@ -180,23 +333,36 @@ func checkExitCode(r report.Report, failOn string) error {
 	return nil
 }
 
-func loadFiles(repoPath string, cfg Config) (*diff.Result, error) {
+func loadFiles(repoPath string, cfg Config, filter diff.Filter) (*diff.Result, error) {
 	if cfg.Paths != "" {
 		paths := strings.Split(cfg.Paths, ",")
 		for i := range paths {
 			paths[i] = strings.TrimSpace(paths[i])
 		}
-		d, err := diff.CollectPaths(repoPath, paths)
+		d, err := diff.CollectPaths(repoPath, paths, filter)
 		if err != nil {
 			return nil, fmt.Errorf("collecting paths: %w", err)
 		}
 		return d, nil
 	}
-	d, err := diff.Parse(repoPath, cfg.BaseBranch)
+	d, err := diff.Parse(repoPath, cfg.BaseBranch, filter)
 	if err != nil {
 		return nil, fmt.Errorf("parsing diff: %w", err)
 	}
 	return d, nil
+}
+
+// diffFilter converts a language's lang.FileFilter into the diff.Filter
+// shape the parser expects. The two shapes are intentionally different:
+// lang.FileFilter exposes the fields languages need to declare their
+// territory (extensions, IsTestFile, DiffGlobs), while diff.Filter only
+// carries what the parser itself reads on each file (Includes + DiffGlobs).
+func diffFilter(l lang.Language) diff.Filter {
+	f := l.FileFilter()
+	return diff.Filter{
+		DiffGlobs: f.DiffGlobs,
+		Includes:  f.IncludesSource,
+	}
 }
 
 func detectBaseBranch(repoPath string) string {

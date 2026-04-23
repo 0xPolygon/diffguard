@@ -30,7 +30,7 @@ diff --git a/pkg/handler/routes_test.go b/pkg/handler/routes_test.go
 +test file should be skipped
 `
 
-	files, err := parseUnifiedDiff(input)
+	files, err := parseUnifiedDiff(input, goFilter())
 	if err != nil {
 		t.Fatalf("parseUnifiedDiff error: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestParseUnifiedDiff_PureDeletion(t *testing.T) {
 @@ -10,5 +10,0 @@
 `
 
-	files, err := parseUnifiedDiff(input)
+	files, err := parseUnifiedDiff(input, goFilter())
 	if err != nil {
 		t.Fatalf("parseUnifiedDiff error: %v", err)
 	}

@@ -11,7 +11,7 @@ func TestCollectPaths_SingleFile(t *testing.T) {
 	fp := filepath.Join(dir, "foo.go")
 	os.WriteFile(fp, []byte("package x\n\nfunc f() {}\n"), 0644)
 
-	r, err := CollectPaths(dir, []string{"foo.go"})
+	r, err := CollectPaths(dir, []string{"foo.go"}, goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestCollectPaths_SkipsTestFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "foo.go"), []byte("package x\n"), 0644)
 	os.WriteFile(filepath.Join(dir, "foo_test.go"), []byte("package x\n"), 0644)
 
-	r, err := CollectPaths(dir, []string{"foo_test.go"})
+	r, err := CollectPaths(dir, []string{"foo_test.go"}, goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestCollectPaths_Directory(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "README.md"), []byte("readme\n"), 0644)
 	os.WriteFile(filepath.Join(dir, "sub", "c.go"), []byte("package x\n"), 0644)
 
-	r, err := CollectPaths(dir, []string{"."})
+	r, err := CollectPaths(dir, []string{"."}, goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestCollectPaths_Directory(t *testing.T) {
 
 func TestCollectPaths_NonexistentPath(t *testing.T) {
 	dir := t.TempDir()
-	_, err := CollectPaths(dir, []string{"nonexistent.go"})
+	_, err := CollectPaths(dir, []string{"nonexistent.go"}, goFilter())
 	if err == nil {
 		t.Error("expected error for nonexistent path")
 	}
@@ -81,7 +81,7 @@ func TestCollectPaths_MultiplePaths(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "pkg1", "a.go"), []byte("package pkg1\n"), 0644)
 	os.WriteFile(filepath.Join(dir, "pkg2", "b.go"), []byte("package pkg2\n"), 0644)
 
-	r, err := CollectPaths(dir, []string{"pkg1", "pkg2"})
+	r, err := CollectPaths(dir, []string{"pkg1", "pkg2"}, goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestCollectPaths_Deduplicates(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package x\n"), 0644)
 
 	// Pass the same file via both file path and dir
-	r, err := CollectPaths(dir, []string{"a.go", "."})
+	r, err := CollectPaths(dir, []string{"a.go", "."}, goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestCollectPaths_SkipsNonGoFile(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("notes"), 0644)
 
-	r, err := CollectPaths(dir, []string{"notes.txt"})
+	r, err := CollectPaths(dir, []string{"notes.txt"}, goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -117,7 +117,13 @@ func TestCollectPaths_SkipsNonGoFile(t *testing.T) {
 	}
 }
 
-func TestIsAnalyzableGoFile(t *testing.T) {
+// TestFilter_IncludesGoFile exercises the path the diff parser takes when
+// deciding whether to admit a file from `git diff` output. The old
+// hardcoded isAnalyzableGoFile function is gone; the same semantic check
+// now lives in the caller-supplied Filter.Includes, and this test locks in
+// that Filter.includes() routes through it correctly.
+func TestFilter_IncludesGoFile(t *testing.T) {
+	filter := goFilter()
 	tests := []struct {
 		path string
 		want bool
@@ -129,8 +135,19 @@ func TestIsAnalyzableGoFile(t *testing.T) {
 		{"path/to/foo_test.go", false},
 	}
 	for _, tt := range tests {
-		if got := isAnalyzableGoFile(tt.path); got != tt.want {
-			t.Errorf("isAnalyzableGoFile(%q) = %v, want %v", tt.path, got, tt.want)
+		if got := filter.includes(tt.path); got != tt.want {
+			t.Errorf("filter.includes(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestFilter_NilIncludesAdmitsAll covers the `Includes == nil` default
+// branch: an empty filter must admit every path.
+func TestFilter_NilIncludesAdmitsAll(t *testing.T) {
+	var f Filter
+	for _, p := range []string{"foo.go", "bar.rs", "anything"} {
+		if !f.includes(p) {
+			t.Errorf("nil-Includes filter should admit %q", p)
 		}
 	}
 }
@@ -145,7 +162,7 @@ func filenames(files []FileChange) []string {
 
 func TestHandleFileLine_GoFile(t *testing.T) {
 	var files []FileChange
-	result := handleFileLine("+++ b/pkg/handler.go", &files)
+	result := handleFileLine("+++ b/pkg/handler.go", goFilter(), &files)
 	if result == nil {
 		t.Fatal("expected non-nil result for .go file")
 	}
@@ -159,7 +176,7 @@ func TestHandleFileLine_GoFile(t *testing.T) {
 
 func TestHandleFileLine_TestFile(t *testing.T) {
 	var files []FileChange
-	result := handleFileLine("+++ b/pkg/handler_test.go", &files)
+	result := handleFileLine("+++ b/pkg/handler_test.go", goFilter(), &files)
 	if result != nil {
 		t.Error("expected nil for test file")
 	}
@@ -170,7 +187,7 @@ func TestHandleFileLine_TestFile(t *testing.T) {
 
 func TestHandleFileLine_NonGoFile(t *testing.T) {
 	var files []FileChange
-	result := handleFileLine("+++ b/README.md", &files)
+	result := handleFileLine("+++ b/README.md", goFilter(), &files)
 	if result != nil {
 		t.Error("expected nil for non-Go file")
 	}
@@ -263,7 +280,7 @@ func TestParseUnifiedDiff_NonGoFile(t *testing.T) {
 @@ -1,0 +1,5 @@
 +new content
 `
-	files, err := parseUnifiedDiff(input)
+	files, err := parseUnifiedDiff(input, goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -273,7 +290,7 @@ func TestParseUnifiedDiff_NonGoFile(t *testing.T) {
 }
 
 func TestParseUnifiedDiff_EmptyInput(t *testing.T) {
-	files, err := parseUnifiedDiff("")
+	files, err := parseUnifiedDiff("", goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -361,7 +378,7 @@ diff --git a/b.go b/b.go
 @@ -10,0 +11,3 @@
 +new code
 `
-	files, err := parseUnifiedDiff(input)
+	files, err := parseUnifiedDiff(input, goFilter())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}

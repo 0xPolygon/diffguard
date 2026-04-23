@@ -1,63 +1,23 @@
 package churn
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/0xPolygon/diffguard/internal/diff"
+	"github.com/0xPolygon/diffguard/internal/lang"
+	_ "github.com/0xPolygon/diffguard/internal/lang/goanalyzer"
 	"github.com/0xPolygon/diffguard/internal/report"
 )
 
-func TestComputeComplexity(t *testing.T) {
-	tests := []struct {
-		name     string
-		code     string
-		expected int
-	}{
-		{"empty", `package p; func f() {}`, 0},
-		{"single if", `package p; func f(x int) { if x > 0 {} }`, 1},
-		{"for loop", `package p; func f() { for i := 0; i < 10; i++ {} }`, 1},
-		{"switch", `package p; func f(x int) { switch x { case 1: } }`, 1},
-		{"range", `package p; func f(s []int) { for range s {} }`, 1},
-		{"select", `package p; func f(c chan int) { select { case <-c: } }`, 1},
-		{"type switch", `package p; func f(x any) { switch x.(type) { case int: } }`, 1},
-		{"logical and", `package p; func f(a, b bool) { if a && b {} }`, 2},
-		{"logical or", `package p; func f(a, b bool) { if a || b {} }`, 2},
-		{"nested", `package p; func f(x int) { if x > 0 { for x > 0 {} } }`, 2},
+func goScorer(t *testing.T) lang.ComplexityScorer {
+	t.Helper()
+	l, ok := lang.Get("go")
+	if !ok {
+		t.Fatal("go language not registered")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, "test.go", tt.code, 0)
-			if err != nil {
-				t.Fatalf("parse error: %v", err)
-			}
-
-			var fn *ast.FuncDecl
-			for _, decl := range f.Decls {
-				if fd, ok := decl.(*ast.FuncDecl); ok {
-					fn = fd
-					break
-				}
-			}
-
-			got := computeComplexity(fn.Body)
-			if got != tt.expected {
-				t.Errorf("computeComplexity = %d, want %d", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestComputeComplexity_NilBody(t *testing.T) {
-	if got := computeComplexity(nil); got != 0 {
-		t.Errorf("computeComplexity(nil) = %d, want 0", got)
-	}
+	return l.ComplexityScorer()
 }
 
 func TestCollectChurnFindings(t *testing.T) {
@@ -81,7 +41,6 @@ func TestCollectChurnFindings(t *testing.T) {
 }
 
 func TestCollectChurnFindings_LimitExceeds(t *testing.T) {
-	// Fewer results than limit of 10
 	results := []FunctionChurn{
 		{File: "a.go", Score: 5, Commits: 1, Complexity: 5},
 	}
@@ -92,16 +51,14 @@ func TestCollectChurnFindings_LimitExceeds(t *testing.T) {
 }
 
 func TestCollectChurnFindings_BoundaryCondition(t *testing.T) {
-	// Exactly at threshold — should NOT warn
 	results := []FunctionChurn{
 		{File: "a.go", Score: 60, Commits: 6, Complexity: 10},
 	}
 	_, warnCount := collectChurnFindings(results, 10)
 	if warnCount != 0 {
-		t.Errorf("warnCount = %d, want 0 (complexity at threshold, not over)", warnCount)
+		t.Errorf("warnCount = %d, want 0", warnCount)
 	}
 
-	// Over threshold and commits > 5 — should warn
 	results2 := []FunctionChurn{
 		{File: "a.go", Score: 66, Commits: 6, Complexity: 11},
 	}
@@ -171,29 +128,6 @@ func TestFormatTopScore(t *testing.T) {
 	}
 }
 
-func TestFuncName(t *testing.T) {
-	tests := []struct {
-		code     string
-		expected string
-	}{
-		{`package p; func Foo() {}`, "Foo"},
-		{`package p; type T struct{}; func (t T) Bar() {}`, "(T).Bar"},
-		{`package p; type T struct{}; func (t *T) Baz() {}`, "(T).Baz"},
-	}
-
-	for _, tt := range tests {
-		fset := token.NewFileSet()
-		f, _ := parser.ParseFile(fset, "test.go", tt.code, 0)
-		for _, decl := range f.Decls {
-			if fd, ok := decl.(*ast.FuncDecl); ok {
-				if got := funcName(fd); got != tt.expected {
-					t.Errorf("funcName = %q, want %q", got, tt.expected)
-				}
-			}
-		}
-	}
-}
-
 func TestAnalyzeFileChurn(t *testing.T) {
 	code := `package test
 
@@ -218,7 +152,10 @@ func complex_fn(a, b int) int {
 		Regions: []diff.ChangedRegion{{StartLine: 1, EndLine: 100}},
 	}
 
-	results := analyzeFileChurn(dir, fc, 5)
+	results, err := analyzeFileChurn(dir, fc, 5, goScorer(t))
+	if err != nil {
+		t.Fatalf("analyzeFileChurn: %v", err)
+	}
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
@@ -232,25 +169,10 @@ func complex_fn(a, b int) int {
 	}
 }
 
-func TestAnalyzeFileChurn_ParseError(t *testing.T) {
-	dir := t.TempDir()
-	fc := diff.FileChange{
-		Path:    "nonexistent.go",
-		Regions: []diff.ChangedRegion{{StartLine: 1, EndLine: 10}},
-	}
-
-	results := analyzeFileChurn(dir, fc, 0)
-	if results != nil {
-		t.Error("expected nil for parse error")
-	}
-}
-
 func TestCollectFileCommits(t *testing.T) {
-	// Use the actual repo to test
 	files := []diff.FileChange{
 		{Path: "internal/churn/churn.go"},
 	}
-	// This will either work or return 0, both are valid
 	commits := collectFileCommits("../..", files)
 	if commits == nil {
 		t.Error("expected non-nil map")
@@ -271,11 +193,63 @@ func f() {}
 	}
 	commits := map[string]int{"test.go": 3}
 
-	results := collectChurnResults(dir, files, commits)
+	results, err := collectChurnResults(dir, files, commits, goScorer(t))
+	if err != nil {
+		t.Fatalf("collectChurnResults: %v", err)
+	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
 	if results[0].Commits != 3 {
 		t.Errorf("commits = %d, want 3", results[0].Commits)
 	}
+}
+
+// erroringScorer returns a canned error so the error-handling branches in
+// collectChurnResults and Analyze run.
+type erroringScorer struct{ err error }
+
+func (s erroringScorer) ScoreFile(absPath string, fc diff.FileChange) ([]lang.FunctionComplexity, error) {
+	return nil, s.err
+}
+
+// TestCollectChurnResults_PropagatesError asserts the scorer error escapes
+// the aggregation helper so the caller can react.
+func TestCollectChurnResults_PropagatesError(t *testing.T) {
+	files := []diff.FileChange{
+		{Path: "nope.go", Regions: []diff.ChangedRegion{{StartLine: 1, EndLine: 1}}},
+	}
+	_, err := collectChurnResults(t.TempDir(), files, map[string]int{"nope.go": 0},
+		erroringScorer{err: errTest})
+	if err == nil {
+		t.Fatal("expected scorer error to propagate")
+	}
+	if !containsAnalyzingPrefix(err.Error()) {
+		t.Errorf("error %q should be wrapped with file context", err)
+	}
+}
+
+// TestAnalyze_PropagatesScorerError pins that the top-level Analyze wraps
+// scorer errors rather than swallowing them — covers the `if err != nil`
+// branch in Analyze.
+func TestAnalyze_PropagatesScorerError(t *testing.T) {
+	d := &diff.Result{Files: []diff.FileChange{
+		{Path: "x.go", Regions: []diff.ChangedRegion{{StartLine: 1, EndLine: 1}}},
+	}}
+	_, err := Analyze(t.TempDir(), d, 10, erroringScorer{err: errTest})
+	if err == nil {
+		t.Fatal("expected Analyze to return scorer error")
+	}
+}
+
+// errTest is a sentinel error value the helpers above return.
+var errTest = testErr("scorer boom")
+
+type testErr string
+
+func (e testErr) Error() string { return string(e) }
+
+func containsAnalyzingPrefix(s string) bool {
+	prefix := "analyzing "
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }

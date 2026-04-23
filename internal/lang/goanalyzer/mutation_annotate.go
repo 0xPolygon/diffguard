@@ -1,27 +1,38 @@
-package mutation
+package goanalyzer
 
 import (
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"strings"
 )
 
-// scanAnnotations returns the set of source lines where mutation generation
-// should be suppressed based on mutator-disable-* comment annotations.
-//
-// Supported annotations:
-//   - // mutator-disable-next-line : skips mutations on the following line
-//   - // mutator-disable-func      : skips mutations in the enclosing function
-func scanAnnotations(fset *token.FileSet, f *ast.File) map[int]bool {
+// annotationScannerImpl implements lang.AnnotationScanner for Go.
+// The disable annotations are `// mutator-disable-next-line` (skips the
+// following source line) and `// mutator-disable-func` (skips every line of
+// the enclosing function, including its signature). Both forms are stripped
+// of their comment markers before matching so either `//` or `/* ... */` is
+// accepted.
+type annotationScannerImpl struct{}
+
+// ScanAnnotations returns the set of source lines on which mutation
+// generation should be suppressed for absPath. The returned map is keyed by
+// 1-based line number; a `true` value means disabled.
+func (annotationScannerImpl) ScanAnnotations(absPath string) (map[int]bool, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, absPath, nil, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+
 	disabled := make(map[int]bool)
 	funcs := funcRanges(fset, f)
-
 	for _, cg := range f.Comments {
 		for _, c := range cg.List {
 			applyAnnotation(stripCommentMarkers(c.Text), fset.Position(c.Pos()).Line, funcs, disabled)
 		}
 	}
-	return disabled
+	return disabled, nil
 }
 
 func stripCommentMarkers(raw string) string {
@@ -65,9 +76,7 @@ func markFuncDisabled(r funcRange, disabled map[int]bool) {
 	}
 }
 
-type funcRange struct {
-	start, end int
-}
+type funcRange struct{ start, end int }
 
 func funcRanges(fset *token.FileSet, f *ast.File) []funcRange {
 	var ranges []funcRange

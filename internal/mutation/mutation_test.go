@@ -1,128 +1,17 @@
 package mutation
 
 import (
-	"go/ast"
-	"go/token"
-	"os"
+	"runtime"
 	"testing"
-
-	"github.com/0xPolygon/diffguard/internal/diff"
 )
 
-func TestBinaryMutants(t *testing.T) {
-	tests := []struct {
-		name     string
-		op       token.Token
-		expected int
-	}{
-		{"greater than", token.GTR, 1},
-		{"less than", token.LSS, 1},
-		{"equal", token.EQL, 1},
-		{"not equal", token.NEQ, 1},
-		{"add", token.ADD, 1},
-		{"subtract", token.SUB, 1},
-		{"multiply", token.MUL, 1},
-		{"divide", token.QUO, 1},
-		{"and (no mutation)", token.LAND, 0},
-		{"or (no mutation)", token.LOR, 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			expr := &ast.BinaryExpr{Op: tt.op}
-			mutants := binaryMutants("test.go", 1, expr)
-			if len(mutants) != tt.expected {
-				t.Errorf("binaryMutants(%v) produced %d mutants, want %d", tt.op, len(mutants), tt.expected)
-			}
-		})
-	}
-}
-
-func TestBoolMutants(t *testing.T) {
-	tests := []struct {
-		name     string
-		ident    string
-		expected int
-	}{
-		{"true", "true", 1},
-		{"false", "false", 1},
-		{"other", "x", 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ident := &ast.Ident{Name: tt.ident}
-			mutants := boolMutants("test.go", 1, ident)
-			if len(mutants) != tt.expected {
-				t.Errorf("boolMutants(%q) produced %d mutants, want %d", tt.ident, len(mutants), tt.expected)
-			}
-		})
-	}
-}
-
-func TestReturnMutants(t *testing.T) {
-	// Return with values
-	ret := &ast.ReturnStmt{
-		Results: []ast.Expr{&ast.Ident{Name: "x"}},
-	}
-	mutants := returnMutants("test.go", 1, ret)
-	if len(mutants) != 1 {
-		t.Errorf("returnMutants with values: got %d, want 1", len(mutants))
-	}
-
-	// Bare return
-	bareRet := &ast.ReturnStmt{}
-	mutants = returnMutants("test.go", 1, bareRet)
-	if len(mutants) != 0 {
-		t.Errorf("returnMutants bare: got %d, want 0", len(mutants))
-	}
-}
-
-func TestGenerateMutants(t *testing.T) {
-	code := `package test
-
-func add(a, b int) int {
-	if a > b {
-		return a + b
-	}
-	return a - b
-}
-`
-	dir := t.TempDir()
-	filePath := dir + "/test.go"
-	if err := os.WriteFile(filePath, []byte(code), 0644); err != nil {
-		t.Fatalf("writeTestFile: %v", err)
-	}
-
-	fc := diff.FileChange{
-		Path: "test.go",
-		Regions: []diff.ChangedRegion{
-			{StartLine: 1, EndLine: 8},
-		},
-	}
-
-	mutants, err := generateMutants(filePath, fc)
-	if err != nil {
-		t.Fatalf("generateMutants error: %v", err)
-	}
-
-	if len(mutants) == 0 {
-		t.Error("expected mutants, got none")
-	}
-
-	// Should have mutations for: > (boundary), + (math), - (math)
-	operators := make(map[string]int)
-	for _, m := range mutants {
-		operators[m.Operator]++
-	}
-
-	if operators["conditional_boundary"] == 0 {
-		t.Error("expected conditional_boundary mutants")
-	}
-	if operators["math_operator"] == 0 {
-		t.Error("expected math_operator mutants")
-	}
-}
+// Most of what used to be tested here was the Go AST machinery:
+// binaryMutants, boolMutants, applyBoolMutation, writeOverlayJSON,
+// buildTestArgs, scanAnnotations, etc. All of that now lives in
+// internal/lang/goanalyzer/ next to the code, and the tests moved with it.
+//
+// What remains here exercises the orchestration: options defaults, mutant
+// sampling, tier aggregation, and section formatting.
 
 func TestSampleMutants(t *testing.T) {
 	mutants := make([]Mutant, 100)
@@ -141,42 +30,46 @@ func TestSampleMutants(t *testing.T) {
 	}
 }
 
-func TestOperatorName(t *testing.T) {
-	tests := []struct {
-		from, to token.Token
-		expected string
-	}{
-		{token.GTR, token.GEQ, "conditional_boundary"},
-		{token.EQL, token.NEQ, "negate_conditional"},
-		{token.ADD, token.SUB, "math_operator"},
-	}
-
-	for _, tt := range tests {
-		got := operatorName(tt.from, tt.to)
-		if got != tt.expected {
-			t.Errorf("operatorName(%v, %v) = %q, want %q", tt.from, tt.to, got, tt.expected)
-		}
+func TestOptionsTimeout_Default(t *testing.T) {
+	opts := Options{}
+	if opts.timeout() != defaultTestTimeout {
+		t.Errorf("default timeout = %v, want %v", opts.timeout(), defaultTestTimeout)
 	}
 }
 
-func TestParseMutationOp(t *testing.T) {
-	tests := []struct {
-		desc     string
-		wantFrom token.Token
-		wantTo   token.Token
-	}{
-		{"> -> >=", token.GTR, token.GEQ},
-		{"== -> !=", token.EQL, token.NEQ},
-		{"+ -> -", token.ADD, token.SUB},
-		{"invalid", token.ILLEGAL, token.ILLEGAL},
-		{"+ -> unknown", token.ILLEGAL, token.ILLEGAL},
+func TestOptionsWorkers(t *testing.T) {
+	zero := Options{}
+	if got, want := zero.workers(), runtime.NumCPU(); got != want {
+		t.Errorf("zero workers = %d, want NumCPU = %d", got, want)
 	}
 
-	for _, tt := range tests {
-		gotFrom, gotTo := parseMutationOp(tt.desc)
-		if gotFrom != tt.wantFrom || gotTo != tt.wantTo {
-			t.Errorf("parseMutationOp(%q) = (%v, %v), want (%v, %v)",
-				tt.desc, gotFrom, gotTo, tt.wantFrom, tt.wantTo)
-		}
+	neg := Options{Workers: -4}
+	if got, want := neg.workers(), runtime.NumCPU(); got != want {
+		t.Errorf("negative workers = %d, want NumCPU = %d", got, want)
+	}
+
+	explicit := Options{Workers: 3}
+	if got := explicit.workers(); got != 3 {
+		t.Errorf("explicit workers = %d, want 3", got)
+	}
+}
+
+func TestOptionsTiers(t *testing.T) {
+	// Defaults kick in when thresholds are zero.
+	zero := Options{}
+	if got := zero.tier1Threshold(); got != defaultTier1Threshold {
+		t.Errorf("tier1 default = %v, want %v", got, defaultTier1Threshold)
+	}
+	if got := zero.tier2Threshold(); got != defaultTier2Threshold {
+		t.Errorf("tier2 default = %v, want %v", got, defaultTier2Threshold)
+	}
+
+	// Explicit values are honored.
+	explicit := Options{Tier1Threshold: 75, Tier2Threshold: 50}
+	if got := explicit.tier1Threshold(); got != 75 {
+		t.Errorf("tier1 explicit = %v, want 75", got)
+	}
+	if got := explicit.tier2Threshold(); got != 50 {
+		t.Errorf("tier2 explicit = %v, want 50", got)
 	}
 }
