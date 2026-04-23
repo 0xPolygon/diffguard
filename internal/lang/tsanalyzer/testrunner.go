@@ -93,6 +93,7 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 
 	cmdName, args := r.buildCommand(cfg)
 	cmd := exec.CommandContext(ctx, cmdName, args...)
+	configureProcessKill(cmd)
 	cmd.Dir = cfg.RepoPath
 	// CI=true suppresses interactive prompts from jest/vitest.
 	cmd.Env = append(os.Environ(), "CI=true")

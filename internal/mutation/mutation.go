@@ -156,12 +156,36 @@ func collectMutants(repoPath string, d *diff.Result, l lang.Language) []Mutant {
 // TestRunner implementation is responsible for isolating concurrent
 // invocations (the Go runner uses `go test -overlay`; non-Go runners use
 // per-file temp-copy + mutex).
+//
+// We additionally serialize ApplyMutation + RunTest per source file here:
+// the in-place temp-copy runners write the mutant over the original on
+// disk while the test runs, and ApplyMutation reads the source from
+// disk. Without this lock, worker B's ApplyMutation can observe worker
+// A's mutated bytes mid-run, producing a compound mutant whose two
+// mutations cancel out and survive the test. Serializing per-file keeps
+// different-file mutants running in parallel while making same-file
+// mutants see pristine source each time.
 func runMutantsParallel(repoPath string, mutants []Mutant, l lang.Language, opts Options, workDir string) int {
 	applier := l.MutantApplier()
 	runner := l.TestRunner()
 
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, opts.workers())
+	var (
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, opts.workers())
+		lockMu   sync.Mutex
+		fileLock = map[string]*sync.Mutex{}
+	)
+
+	lockFor := func(path string) *sync.Mutex {
+		lockMu.Lock()
+		defer lockMu.Unlock()
+		m, ok := fileLock[path]
+		if !ok {
+			m = &sync.Mutex{}
+			fileLock[path] = m
+		}
+		return m
+	}
 
 	for i := range mutants {
 		wg.Add(1)
@@ -169,6 +193,10 @@ func runMutantsParallel(repoPath string, mutants []Mutant, l lang.Language, opts
 		go func(idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			absPath := filepath.Join(repoPath, mutants[idx].File)
+			lock := lockFor(absPath)
+			lock.Lock()
+			defer lock.Unlock()
 			mutants[idx].Killed = runMutant(repoPath, &mutants[idx], applier, runner, opts, workDir, idx)
 		}(i)
 	}

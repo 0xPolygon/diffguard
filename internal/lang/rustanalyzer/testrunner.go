@@ -103,6 +103,7 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 
 	args := r.buildArgs(cfg)
 	cmd := exec.CommandContext(ctx, r.cmd, args...)
+	configureProcessKill(cmd)
 	cmd.Dir = cfg.RepoPath
 	cmd.Env = append(os.Environ(), "CARGO_INCREMENTAL=0")
 	var combined bytes.Buffer
