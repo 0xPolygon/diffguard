@@ -1,0 +1,12 @@
+{
+  "worst_severity": "FAIL",
+  "sections": [
+    {
+      "name": "Cognitive Complexity",
+      "severity": "FAIL",
+      "must_have_findings": [
+        {"file": "tangled.ts", "function": "tangled", "severity": "FAIL"}
+      ]
+    }
+  ]
+}

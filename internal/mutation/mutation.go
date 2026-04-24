@@ -151,25 +151,38 @@ func collectMutants(repoPath string, d *diff.Result, l lang.Language) []Mutant {
 	return all
 }
 
-// runMutantsParallel processes mutants concurrently up to opts.workers().
-// Each mutant goes through ApplyMutation -> TestRunner.RunTest; the
-// TestRunner implementation is responsible for isolating concurrent
-// invocations (the Go runner uses `go test -overlay`; non-Go runners use
-// per-file temp-copy + mutex).
+// runMutantsParallel processes mutants in two phases:
+//
+//  1. Prepare: ApplyMutation for every mutant and write the mutated bytes
+//     to a temp file. Runs before any RunTest so ApplyMutation always sees
+//     pristine source on disk — critical for temp-copy runners (TypeScript)
+//     that swap the mutant over the real file during RunTest. If we
+//     interleaved apply + test, a concurrent worker's ApplyMutation could
+//     read a file that another worker's RunTest had temporarily mutated,
+//     produce the wrong mutant (or fail to locate its target), and get
+//     silently reported as SURVIVED.
+//  2. Test: RunTest for each prepared mutant, capped at opts.workers().
+//     The TestRunner is responsible for per-file isolation (Go uses overlay,
+//     non-Go runners serialize same-file mutants via a mutex).
 func runMutantsParallel(repoPath string, mutants []Mutant, l lang.Language, opts Options, workDir string) int {
 	applier := l.MutantApplier()
 	runner := l.TestRunner()
+
+	prepared := prepareMutants(repoPath, mutants, applier, workDir, opts.workers())
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, opts.workers())
 
 	for i := range mutants {
+		if prepared[i] == "" {
+			continue
+		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			mutants[idx].Killed = runMutant(repoPath, &mutants[idx], applier, runner, opts, workDir, idx)
+			mutants[idx].Killed = runPreparedMutant(repoPath, &mutants[idx], prepared[idx], runner, opts, workDir, idx)
 		}(i)
 	}
 	wg.Wait()
@@ -183,10 +196,36 @@ func runMutantsParallel(repoPath string, mutants []Mutant, l lang.Language, opts
 	return killed
 }
 
-// runMutant applies the mutation, writes the mutated source to a temp file
-// inside workDir, and hands it to the language's TestRunner. The runner
-// returns (killed, output, err); on runner error we skip the mutant.
-func runMutant(repoPath string, m *Mutant, applier lang.MutantApplier, runner lang.TestRunner, opts Options, workDir string, idx int) bool {
+// prepareMutants applies every mutation to pristine source and stores the
+// mutated bytes in per-mutant temp files. Returns a parallel slice of
+// mutantFile paths; an empty string marks a skipped mutant (the applier
+// declined to produce bytes — parse error, no target, equivalence, …).
+//
+// Apply is parallelized across mutants because no RunTest has fired yet,
+// so the source files on disk are still pristine and safe for concurrent
+// reads.
+func prepareMutants(repoPath string, mutants []Mutant, applier lang.MutantApplier, workDir string, workers int) []string {
+	prepared := make([]string, len(mutants))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, workers)
+
+	for i := range mutants {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			prepared[idx] = prepareMutant(repoPath, mutants[idx], applier, workDir, idx)
+		}(i)
+	}
+	wg.Wait()
+	return prepared
+}
+
+// prepareMutant runs ApplyMutation and writes the resulting bytes to a
+// mutant-specific temp file. Returns the temp file path on success, or
+// "" if the mutant was skipped (apply error / nil bytes / write error).
+func prepareMutant(repoPath string, m Mutant, applier lang.MutantApplier, workDir string, idx int) string {
 	absPath := filepath.Join(repoPath, m.File)
 
 	mutated, err := applier.ApplyMutation(absPath, lang.MutantSite{
@@ -196,13 +235,21 @@ func runMutant(repoPath string, m *Mutant, applier lang.MutantApplier, runner la
 		Operator:    m.Operator,
 	})
 	if err != nil || mutated == nil {
-		return false
+		return ""
 	}
 
 	mutantFile := filepath.Join(workDir, fmt.Sprintf("m%d%s", idx, filepath.Ext(absPath)))
 	if err := os.WriteFile(mutantFile, mutated, 0644); err != nil {
-		return false
+		return ""
 	}
+	return mutantFile
+}
+
+// runPreparedMutant hands an already-written mutant file to the language's
+// TestRunner. The runner returns (killed, output, err); on runner error we
+// skip the mutant.
+func runPreparedMutant(repoPath string, m *Mutant, mutantFile string, runner lang.TestRunner, opts Options, workDir string, idx int) bool {
+	absPath := filepath.Join(repoPath, m.File)
 
 	killed, output, err := runner.RunTest(lang.TestRunConfig{
 		RepoPath:     repoPath,
