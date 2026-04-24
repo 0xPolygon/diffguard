@@ -1,6 +1,6 @@
 # diffguard
 
-A targeted code quality gate for Go repositories. Analyzes either the changed regions of a git diff (CI mode) or specified files/directories (refactoring mode), and reports on complexity, size, dependency structure, churn risk, and mutation test coverage.
+A targeted code quality gate for Go and TypeScript repositories. Analyzes either the changed regions of a git diff (CI mode) or specified files/directories (refactoring mode), and reports on complexity, size, dependency structure, churn risk, and mutation test coverage.
 
 ## Why
 
@@ -42,6 +42,10 @@ diffguard --base main /path/to/repo
 diffguard --paths internal/foo/bar.go /path/to/repo
 diffguard --paths internal/foo/,internal/bar/ /path/to/repo
 
+# TypeScript project (vitest/jest auto-detected from package.json)
+diffguard --base main /path/to/ts-repo
+diffguard --paths src/auth/,src/billing/ /path/to/ts-repo
+
 # Skip mutation testing (fastest)
 diffguard --skip-mutation /path/to/repo
 
@@ -64,6 +68,40 @@ diffguard \
 **Diff mode (default):** Analyzes only the regions changed between `HEAD` and the base branch. Use this as a CI gate for PRs.
 
 **Refactoring mode (`--paths`):** Analyzes the full content of the specified files or directories, ignoring git diff entirely. Use this when iterating on an existing file's quality without a base to compare against.
+
+## Languages
+
+Diffguard auto-detects supported languages from the files it sees. No flag selects the language — analyzers activate on their own file types.
+
+| Language   | Files          | Test runner                                                                    |
+|------------|----------------|--------------------------------------------------------------------------------|
+| Go         | `*.go`         | `go test`                                                                      |
+| TypeScript | `*.ts`, `*.tsx`| Auto-detected from `package.json`: `npx vitest run` → `npx jest` → `npm test`  |
+
+**TypeScript prerequisites.** `node` and `npm` (or `npx`) must be on `PATH` for mutation testing. The TypeScript analyzer only activates when the repo has a `package.json` AND at least one `.ts` / `.tsx` file, so pure-JS projects are left alone. Test files (`*.test.ts`, `*.spec.ts`, `*.test.tsx`, `*.spec.tsx`, or anything under a `__tests__` / `__mocks__` segment) are excluded from mutation. Mutation testing spawns the detected runner once per mutant, so expect TS runs to take longer than Go runs (node startup + TS compile per mutant) — use `--mutation-sample-rate` for fast PR feedback.
+
+### TypeScript example
+
+```bash
+# Go install once
+go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
+
+# From your TypeScript repo, PR-style diff mode with a 20% mutation sample
+cd /path/to/ts-repo
+diffguard --mutation-sample-rate 20 --base origin/main .
+
+# Or scope to specific subdirectories in refactoring mode
+diffguard --paths src/billing/,src/auth/ .
+```
+
+In GitHub Actions, add `actions/setup-node` and an `npm ci` step to the [Per-PR gate workflow](#github-actions) below so `npx vitest` / `npx jest` are available when diffguard spawns mutant runs. The extra steps, inserted after `actions/setup-go`:
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: '20'
+- run: npm ci   # installs vitest / jest so diffguard can invoke them per mutant
+```
 
 ## What It Measures
 
