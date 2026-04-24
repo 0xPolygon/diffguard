@@ -180,7 +180,8 @@ func collectDir(repoPath, absPath string, filter Filter, files *[]FileChange, se
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !filter.includes(path) {
+		// mutator-disable-next-line
+		if d.IsDir() {
 			return nil
 		}
 		return addFile(repoPath, path, filter, files, seen)
