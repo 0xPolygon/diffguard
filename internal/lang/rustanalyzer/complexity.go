@@ -92,65 +92,54 @@ func walkComplexity(n *sitter.Node, src []byte, nesting int) int {
 	if n == nil {
 		return 0
 	}
-	total := 0
-	switch n.Type() {
-	case "if_expression":
-		total += 1 + nesting
-		total += conditionLogicalOps(n.ChildByFieldName("condition"))
-		total += walkChildrenWithNesting(n, src, nesting)
+	if total, handled := controlFlowComplexity(n, src, nesting); handled {
 		return total
-	case "while_expression":
-		total += 1 + nesting
-		total += conditionLogicalOps(n.ChildByFieldName("condition"))
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "for_expression":
-		total += 1 + nesting
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "loop_expression":
-		total += 1 + nesting
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "match_expression":
-		total += 1 + nesting
-		total += countGuardedArms(n)
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "if_let_expression":
-		// Older grammar versions model `if let` as a distinct node; current
-		// versions fold it into if_expression with a `let_condition` child.
-		// We cover both so the walker is resilient across grammar updates.
-		// The scrutinee (what follows `=` in `if let P = value`) lives in
-		// the `value` field and may itself be a `&&`/`||` chain.
-		total += 1 + nesting
-		total += conditionLogicalOps(n.ChildByFieldName("value"))
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "while_let_expression":
-		total += 1 + nesting
-		total += conditionLogicalOps(n.ChildByFieldName("value"))
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "closure_expression":
-		// A closure body introduces its own nesting context and doesn't
-		// inherit the outer nesting depth — same treatment as Go's FuncLit.
-		if body := n.ChildByFieldName("body"); body != nil {
-			total += walkComplexity(body, src, 0)
-		}
-		return total
-	case "function_item":
-		// Nested function declarations are treated as separate functions
-		// for the size extractor and should not contribute here.
-		return 0
 	}
-
-	// Descend into children without adding nesting for plain blocks,
-	// expressions, statements, etc.
-	for i := 0; i < int(n.ChildCount()); i++ {
+	total := 0
+	for i := range int(n.ChildCount()) {
 		total += walkComplexity(n.Child(i), src, nesting)
 	}
 	return total
+}
+
+// controlFlowComplexity handles the node types that contribute to the
+// cognitive score directly. The second return reports whether this
+// function took responsibility for the node; a false means the caller
+// should fall back to a generic child-walk.
+func controlFlowComplexity(n *sitter.Node, src []byte, nesting int) (int, bool) {
+	switch n.Type() {
+	case "if_expression", "while_expression":
+		return conditionalScore(n, src, nesting, "condition"), true
+	case "for_expression", "loop_expression":
+		return 1 + nesting + walkChildrenWithNesting(n, src, nesting), true
+	case "match_expression":
+		return 1 + nesting + countGuardedArms(n) + walkChildrenWithNesting(n, src, nesting), true
+	case "if_let_expression", "while_let_expression":
+		// Scrutinee (what follows `=`) lives in the `value` field and may
+		// itself be a `&&`/`||` chain worth counting.
+		return conditionalScore(n, src, nesting, "value"), true
+	case "closure_expression":
+		// Closure bodies reset nesting, matching Go's FuncLit treatment.
+		if body := n.ChildByFieldName("body"); body != nil {
+			return walkComplexity(body, src, 0), true
+		}
+		return 0, true
+	case "function_item":
+		// Nested function declarations are separate units; they don't
+		// contribute to the enclosing function's score.
+		return 0, true
+	}
+	return 0, false
+}
+
+// conditionalScore is `+1 + nesting + logical-op charges + recursive
+// body charges` for the if/while/if-let/while-let family.
+// conditionField names the tree-sitter field holding the tested
+// expression so we charge logical-ops exactly once.
+func conditionalScore(n *sitter.Node, src []byte, nesting int, conditionField string) int {
+	return 1 + nesting +
+		conditionLogicalOps(n.ChildByFieldName(conditionField)) +
+		walkChildrenWithNesting(n, src, nesting)
 }
 
 // walkChildrenWithNesting recurses into the subtrees whose bodies belong to
@@ -162,7 +151,7 @@ func walkChildrenWithNesting(n *sitter.Node, src []byte, nesting int) int {
 	total := 0
 	// Tree-sitter exposes the sub-trees we want via named fields. Any
 	// field we haven't handled explicitly is walked as a body for safety.
-	for i := 0; i < int(n.ChildCount()); i++ {
+	for i := range int(n.ChildCount()) {
 		c := n.Child(i)
 		if c == nil {
 			continue
@@ -227,7 +216,7 @@ func countGuardedArms(match *sitter.Node) int {
 //
 // We check for either to stay resilient across grammar updates.
 func hasGuard(arm *sitter.Node) bool {
-	for i := 0; i < int(arm.ChildCount()); i++ {
+	for i := range int(arm.ChildCount()) {
 		c := arm.Child(i)
 		if c == nil {
 			continue

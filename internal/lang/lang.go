@@ -44,15 +44,38 @@ func (f FileFilter) MatchesExtension(path string) bool {
 }
 
 // IncludesSource reports whether path is an analyzable source file: the
-// extension matches and the file is not a test file.
+// extension matches, the file is not a test file, and it doesn't live
+// under a `testdata/` directory. The testdata rule is a Go convention
+// — `go build` ignores any directory literally named `testdata` — and
+// we apply it cross-language so fixtures shared across analyzers
+// don't get flagged as production violations.
 func (f FileFilter) IncludesSource(path string) bool {
 	if !f.MatchesExtension(path) {
+		return false
+	}
+	if hasTestdataSegment(path) {
 		return false
 	}
 	if f.IsTestFile != nil && f.IsTestFile(path) {
 		return false
 	}
 	return true
+}
+
+// hasTestdataSegment reports whether any directory component of path is
+// literally `testdata`. Normalizes Windows separators so CI and dev
+// machines agree.
+func hasTestdataSegment(path string) bool {
+	start := 0
+	for i := 0; i <= len(path); i++ {
+		if i == len(path) || path[i] == '/' || path[i] == '\\' {
+			if i-start == len("testdata") && path[start:i] == "testdata" {
+				return true
+			}
+			start = i + 1
+		}
+	}
+	return false
 }
 
 // hasSuffix is a tiny helper used to avoid pulling in strings just for this

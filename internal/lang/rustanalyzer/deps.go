@@ -44,31 +44,48 @@ func parseCargoPackageName(content string) string {
 	inPackage := false
 	for _, raw := range strings.Split(content, "\n") {
 		line := strings.TrimSpace(raw)
-		if strings.HasPrefix(line, "#") {
+		if skipTomlLine(line) {
 			continue
 		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+		if isTomlHeader(line) {
 			inPackage = strings.EqualFold(line, "[package]")
 			continue
 		}
 		if !inPackage {
 			continue
 		}
-		if !strings.HasPrefix(line, "name") {
-			continue
-		}
-		// line looks like: name = "foo" or name="foo"
-		eq := strings.IndexByte(line, '=')
-		if eq < 0 {
-			continue
-		}
-		val := strings.TrimSpace(line[eq+1:])
-		val = strings.Trim(val, "\"'")
-		if val != "" {
-			return val
+		if name := extractNameValue(line); name != "" {
+			return name
 		}
 	}
 	return ""
+}
+
+// skipTomlLine reports whether a trimmed TOML line has no declarative
+// content worth inspecting (blank or comment).
+func skipTomlLine(line string) bool {
+	return line == "" || strings.HasPrefix(line, "#")
+}
+
+// isTomlHeader matches `[section]` lines (not `[[arrays]]` — we don't
+// care about those for `[package]` detection).
+func isTomlHeader(line string) bool {
+	return strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]")
+}
+
+// extractNameValue parses `name = "foo"` (any quote style) from a line
+// inside a [package] table, returning the unquoted value or "" if the
+// line isn't a name assignment or the value is empty.
+func extractNameValue(line string) string {
+	if !strings.HasPrefix(line, "name") {
+		return ""
+	}
+	eq := strings.IndexByte(line, '=')
+	if eq < 0 {
+		return ""
+	}
+	val := strings.TrimSpace(line[eq+1:])
+	return strings.Trim(val, "\"'")
 }
 
 // ScanPackageImports returns a single-entry adjacency map:
@@ -158,42 +175,51 @@ func addUseEdge(n *sitter.Node, src []byte, pkgDir string, deps map[string]bool)
 // module (directory), not the symbol.
 func collectUseSegments(n *sitter.Node, src []byte) []string {
 	var segs []string
-	var collect func(*sitter.Node)
-	collect = func(cur *sitter.Node) {
-		if cur == nil {
+	collectUseSegmentsInto(n, src, &segs)
+	return segs
+}
+
+// collectUseSegmentsInto dispatches on node type to a small set of
+// per-kind helpers so the top-level function stays below the complexity
+// threshold. Segments are appended to *segs in left-to-right order.
+func collectUseSegmentsInto(cur *sitter.Node, src []byte, segs *[]string) {
+	if cur == nil {
+		return
+	}
+	switch cur.Type() {
+	case "scoped_identifier":
+		collectScopedIdent(cur, src, segs)
+	case "identifier", "crate", "self", "super":
+		*segs = append(*segs, nodeText(cur, src))
+	case "use_list":
+		collectFirstListItem(cur, src, segs)
+	case "scoped_use_list":
+		collectUseSegmentsInto(cur.ChildByFieldName("path"), src, segs)
+		collectUseSegmentsInto(cur.ChildByFieldName("list"), src, segs)
+	case "use_as_clause":
+		collectUseSegmentsInto(cur.ChildByFieldName("path"), src, segs)
+	}
+}
+
+func collectScopedIdent(cur *sitter.Node, src []byte, segs *[]string) {
+	collectUseSegmentsInto(cur.ChildByFieldName("path"), src, segs)
+	if name := cur.ChildByFieldName("name"); name != nil {
+		*segs = append(*segs, nodeText(name, src))
+	}
+}
+
+// collectFirstListItem descends into the first named child of a
+// `{a, b}` use list. Enough to retain the shared prefix already
+// emitted by the caller; full enumeration isn't needed because edges
+// are directory-level, not symbol-level.
+func collectFirstListItem(cur *sitter.Node, src []byte, segs *[]string) {
+	for i := range int(cur.ChildCount()) {
+		c := cur.Child(i)
+		if c != nil && c.IsNamed() {
+			collectUseSegmentsInto(c, src, segs)
 			return
 		}
-		switch cur.Type() {
-		case "scoped_identifier":
-			collect(cur.ChildByFieldName("path"))
-			if name := cur.ChildByFieldName("name"); name != nil {
-				segs = append(segs, nodeText(name, src))
-			}
-		case "identifier", "crate", "self", "super":
-			segs = append(segs, nodeText(cur, src))
-		case "use_list":
-			// Take only the first item of a `{a, b}` list — enough to
-			// retain the shared prefix that already got emitted.
-			if cur.ChildCount() > 0 {
-				for i := 0; i < int(cur.ChildCount()); i++ {
-					c := cur.Child(i)
-					if c != nil && c.IsNamed() {
-						collect(c)
-						return
-					}
-				}
-			}
-		case "scoped_use_list":
-			collect(cur.ChildByFieldName("path"))
-			if list := cur.ChildByFieldName("list"); list != nil {
-				collect(list)
-			}
-		case "use_as_clause":
-			collect(cur.ChildByFieldName("path"))
-		}
 	}
-	collect(n)
-	return segs
 }
 
 // resolveInternalPath maps a sequence of use segments to a repo-relative

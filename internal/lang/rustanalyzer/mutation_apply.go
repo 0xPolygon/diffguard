@@ -1,6 +1,7 @@
 package rustanalyzer
 
 import (
+	"slices"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -93,11 +94,7 @@ func findOnLine(root *sitter.Node, line int, pred func(*sitter.Node) bool) *sitt
 
 // replaceRange returns src with the bytes [start, end) replaced by `with`.
 func replaceRange(src []byte, start, end uint32, with []byte) []byte {
-	out := make([]byte, 0, len(src)-int(end-start)+len(with))
-	out = append(out, src[:start]...)
-	out = append(out, with...)
-	out = append(out, src[end:]...)
-	return out
+	return slices.Concat(src[:start], with, src[end:])
 }
 
 // applyBinary swaps the operator of a binary_expression on the target line.

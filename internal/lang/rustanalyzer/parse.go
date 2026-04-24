@@ -75,8 +75,7 @@ func walk(n *sitter.Node, fn func(*sitter.Node) bool) {
 	if !fn(n) {
 		return
 	}
-	count := int(n.ChildCount())
-	for i := 0; i < count; i++ {
+	for i := range int(n.ChildCount()) {
 		walk(n.Child(i), fn)
 	}
 }

@@ -159,24 +159,38 @@ func enclosingImplType(n *sitter.Node, src []byte) string {
 // type expression here, including `generic_type` with a `type_arguments`
 // child and `scoped_type_identifier` with a `path::`/`name` pair.
 func simpleTypeName(n *sitter.Node, src []byte) string {
+	if name := simpleTypeNameFromShape(n, src); name != "" {
+		return name
+	}
+	if name := lastIdentifierChild(n, src); name != "" {
+		return name
+	}
+	return nodeText(n, src)
+}
+
+// simpleTypeNameFromShape handles the four common type-expression shapes
+// by dispatching on node type. Returns "" when the shape isn't handled
+// or the expected field is absent; callers fall back to a child scan.
+func simpleTypeNameFromShape(n *sitter.Node, src []byte) string {
 	switch n.Type() {
 	case "type_identifier", "primitive_type":
 		return nodeText(n, src)
-	case "generic_type":
-		if inner := n.ChildByFieldName("type"); inner != nil {
-			return simpleTypeName(inner, src)
-		}
 	case "scoped_type_identifier":
 		if name := n.ChildByFieldName("name"); name != nil {
 			return nodeText(name, src)
 		}
-	case "reference_type":
+	case "generic_type", "reference_type":
 		if inner := n.ChildByFieldName("type"); inner != nil {
 			return simpleTypeName(inner, src)
 		}
 	}
-	// Fallback: take the last identifier-looking child so unusual shapes
-	// don't collapse to an empty name.
+	return ""
+}
+
+// lastIdentifierChild returns the text of the last identifier-shaped
+// named child, so unusual type expressions still yield a non-empty
+// name instead of collapsing to the raw node text.
+func lastIdentifierChild(n *sitter.Node, src []byte) string {
 	for i := int(n.ChildCount()) - 1; i >= 0; i-- {
 		c := n.Child(i)
 		if c == nil {
@@ -186,7 +200,7 @@ func simpleTypeName(n *sitter.Node, src []byte) string {
 			return nodeText(c, src)
 		}
 	}
-	return nodeText(n, src)
+	return ""
 }
 
 // countLines returns the number of source lines in src. An empty file is

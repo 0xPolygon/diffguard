@@ -72,27 +72,11 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	mutantBytes, err := os.ReadFile(cfg.MutantFile)
+	restore, err := swapInMutant(cfg)
 	if err != nil {
-		return false, "", fmt.Errorf("reading mutant file: %w", err)
-	}
-	originalBytes, err := os.ReadFile(cfg.OriginalFile)
-	if err != nil {
-		return false, "", fmt.Errorf("reading original file: %w", err)
-	}
-
-	// Defer restore BEFORE writing the mutant so a panic between the
-	// write and the test run can't leave a corrupt source file behind.
-	restore := func() {
-		// Best-effort restore; we don't have a sane way to report an
-		// error here and the harness is expected to panic-safely run.
-		_ = os.WriteFile(cfg.OriginalFile, originalBytes, 0644)
+		return false, "", err
 	}
 	defer restore()
-
-	if err := os.WriteFile(cfg.OriginalFile, mutantBytes, 0644); err != nil {
-		return false, "", fmt.Errorf("writing mutant over original: %w", err)
-	}
 
 	timeout := cfg.Timeout
 	if timeout <= 0 {
@@ -101,28 +85,46 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	args := r.buildArgs(cfg)
-	cmd := exec.CommandContext(ctx, r.cmd, args...)
+	output, runErr := r.runCargoTest(ctx, cfg)
+	// A timeout or a non-zero exit both count as killed — the mutant
+	// either broke tests or made them so slow they couldn't finish.
+	killed := ctx.Err() == context.DeadlineExceeded || runErr != nil
+	return killed, output, nil
+}
+
+// swapInMutant reads the mutant and original, writes the mutant over
+// the original, and returns a restore closure that puts the original
+// back. Deferring the restore before any test run ensures a panic
+// mid-test still leaves a clean working copy.
+func swapInMutant(cfg lang.TestRunConfig) (func(), error) {
+	mutantBytes, err := os.ReadFile(cfg.MutantFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading mutant file: %w", err)
+	}
+	originalBytes, err := os.ReadFile(cfg.OriginalFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading original file: %w", err)
+	}
+	if err := os.WriteFile(cfg.OriginalFile, mutantBytes, 0644); err != nil {
+		return nil, fmt.Errorf("writing mutant over original: %w", err)
+	}
+	return func() { _ = os.WriteFile(cfg.OriginalFile, originalBytes, 0644) }, nil
+}
+
+// runCargoTest spawns `cargo test` under the caller's context, returns
+// combined stdout+stderr, and the run error. A non-nil error may be a
+// cargo failure or context cancellation; callers disambiguate via
+// ctx.Err().
+func (r *testRunnerImpl) runCargoTest(ctx context.Context, cfg lang.TestRunConfig) (string, error) {
+	cmd := exec.CommandContext(ctx, r.cmd, r.buildArgs(cfg)...)
 	configureProcessKill(cmd)
 	cmd.Dir = cfg.RepoPath
 	cmd.Env = append(os.Environ(), "CARGO_INCREMENTAL=0")
 	var combined bytes.Buffer
 	cmd.Stdout = &combined
 	cmd.Stderr = &combined
-
-	runErr := cmd.Run()
-	output := combined.String()
-
-	// A timeout is reported as "killed" — the mutant made tests so slow
-	// they couldn't finish within the allotted window, which is a
-	// meaningful signal in line with the Go analyzer's treatment.
-	if ctx.Err() == context.DeadlineExceeded {
-		return true, output, nil
-	}
-	if runErr != nil {
-		return true, output, nil
-	}
-	return false, output, nil
+	err := cmd.Run()
+	return combined.String(), err
 }
 
 // buildArgs returns the argv after the command name. When the caller
