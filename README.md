@@ -82,8 +82,15 @@ diffguard --base main /path/to/repo
 diffguard --paths internal/foo/bar.go /path/to/repo
 diffguard --paths internal/foo/,internal/bar/ /path/to/repo
 
+# TypeScript project (vitest/jest auto-detected from package.json)
+diffguard --base main /path/to/ts-repo
+diffguard --paths src/auth/,src/billing/ /path/to/ts-repo
+
 # Skip mutation testing (fastest)
 diffguard --skip-mutation /path/to/repo
+
+# Generated files are skipped by default; disable that if needed
+diffguard --skip-generated=false /path/to/repo
 
 # Or sample a subset of mutants for faster-but-still-useful signal
 diffguard --mutation-sample-rate 20 /path/to/repo
@@ -104,6 +111,35 @@ diffguard \
 **Diff mode (default):** Analyzes only the regions changed between `HEAD` and the base branch. Use this as a CI gate for PRs.
 
 **Refactoring mode (`--paths`):** Analyzes the full content of the specified files or directories, ignoring git diff entirely. Use this when iterating on an existing file's quality without a base to compare against.
+
+**Generated-file skipping (`--skip-generated`):** Enabled by default. Files marked with a standard generated-code banner such as `Code generated ... DO NOT EDIT` are excluded before they reach any analyzer. Pass `--skip-generated=false` to include them.
+
+### TypeScript notes
+
+`node` and `npm` (or `npx`) must be on `PATH` for mutation testing. The TypeScript analyzer activates when the repo has a `package.json` AND at least one `.ts` / `.tsx` file, so pure-JS projects are left alone. Test files (`*.test.ts`, `*.spec.ts`, `*.test.tsx`, `*.spec.tsx`, or anything under a `__tests__` / `__mocks__` segment) are excluded from mutation. Test runner selection: `npx vitest run` → `npx jest` → `npm test`, auto-detected from `package.json`. Mutation testing spawns the detected runner once per mutant, so expect TS runs to take longer than Go runs (node startup + TS compile per mutant) — use `--mutation-sample-rate` for fast PR feedback.
+
+### TypeScript example
+
+```bash
+# Go install once
+go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
+
+# From your TypeScript repo, PR-style diff mode with a 20% mutation sample
+cd /path/to/ts-repo
+diffguard --mutation-sample-rate 20 --base origin/main .
+
+# Or scope to specific subdirectories in refactoring mode
+diffguard --paths src/billing/,src/auth/ .
+```
+
+In GitHub Actions, add `actions/setup-node` and an `npm ci` step to the [Per-PR gate workflow](#github-actions) below so `npx vitest` / `npx jest` are available when diffguard spawns mutant runs. The extra steps, inserted after `actions/setup-go`:
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: '20'
+- run: npm ci   # installs vitest / jest so diffguard can invoke them per mutant
+```
 
 ## What It Measures
 
@@ -246,6 +282,7 @@ Flags:
   --function-size-threshold int   Maximum lines per function (default 50)
   --file-size-threshold int       Maximum lines per file (default 500)
   --skip-mutation                 Skip mutation testing
+  --skip-generated                Skip files marked as generated (for example `Code generated ... DO NOT EDIT`) (default true)
   --mutation-sample-rate float    Percentage of mutants to test, 0-100 (default 100)
   --test-timeout duration         Per-mutant test timeout (default 30s)
   --test-pattern string           Pattern passed to the per-language test runner (scopes tests to speed up slow suites;
