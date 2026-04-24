@@ -28,6 +28,7 @@ func main() {
 	flag.IntVar(&cfg.FunctionSizeThreshold, "function-size-threshold", 50, "Maximum lines per function")
 	flag.IntVar(&cfg.FileSizeThreshold, "file-size-threshold", 500, "Maximum lines per file")
 	flag.BoolVar(&cfg.SkipMutation, "skip-mutation", false, "Skip mutation testing")
+	flag.BoolVar(&cfg.SkipGenerated, "skip-generated", true, "Skip files marked as generated (for example `Code generated ... DO NOT EDIT`)")
 	flag.Float64Var(&cfg.MutationSampleRate, "mutation-sample-rate", 100, "Percentage of mutants to test, 0-100")
 	flag.DurationVar(&cfg.TestTimeout, "test-timeout", 30*time.Second, "Per-mutant test binary timeout (e.g. 60s, 2m)")
 	flag.StringVar(&cfg.TestPattern, "test-pattern", "", "Test name pattern passed to `go test -run` for each mutant (speeds up mutation testing on packages with slow suites)")
@@ -69,6 +70,7 @@ type Config struct {
 	FunctionSizeThreshold int
 	FileSizeThreshold     int
 	SkipMutation          bool
+	SkipGenerated         bool
 	MutationSampleRate    float64
 	TestTimeout           time.Duration
 	TestPattern           string
@@ -145,7 +147,7 @@ func collectLanguageResults(repoPath string, cfg Config, languages []lang.Langua
 //     (the caller should exit without writing a report — legacy UX).
 //   - (_, _, _, err)              on pipeline failure.
 func analyzeLanguage(repoPath string, cfg Config, l lang.Language, numLanguages int) (langResult, bool, bool, error) {
-	d, err := loadFiles(repoPath, cfg, diffFilter(l))
+	d, err := loadFiles(repoPath, cfg, diffFilter(repoPath, cfg, l))
 	if err != nil {
 		return langResult{}, false, false, err
 	}
@@ -358,11 +360,20 @@ func loadFiles(repoPath string, cfg Config, filter diff.Filter) (*diff.Result, e
 // lang.FileFilter exposes the fields languages need to declare their
 // territory (extensions, IsTestFile, DiffGlobs), while diff.Filter only
 // carries what the parser itself reads on each file (Includes + DiffGlobs).
-func diffFilter(l lang.Language) diff.Filter {
+func diffFilter(repoPath string, cfg Config, l lang.Language) diff.Filter {
 	f := l.FileFilter()
+	includes := f.IncludesSource
+	if cfg.SkipGenerated {
+		includes = func(path string) bool {
+			if !f.IncludesSource(path) {
+				return false
+			}
+			return !diff.IsGeneratedFile(repoPath, path)
+		}
+	}
 	return diff.Filter{
 		DiffGlobs: f.DiffGlobs,
-		Includes:  f.IncludesSource,
+		Includes:  includes,
 	}
 }
 
