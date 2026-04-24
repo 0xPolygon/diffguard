@@ -92,63 +92,76 @@ func walkComplexity(n *sitter.Node, src []byte, nesting int) int {
 	if n == nil {
 		return 0
 	}
-	total := 0
-	switch n.Type() {
-	case "if_statement":
-		total += 1 + nesting
-		total += conditionLogicalOps(n.ChildByFieldName("condition"))
-		// else branch (when present) contributes +1 plus its own body walk.
-		if alt := n.ChildByFieldName("alternative"); alt != nil {
-			total += 1
-		}
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "for_statement", "for_in_statement", "for_of_statement",
-		"while_statement":
-		total += 1 + nesting
-		total += conditionLogicalOps(n.ChildByFieldName("condition"))
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "switch_statement":
-		total += 1 + nesting
-		total += countNonEmptyCases(n)
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "try_statement":
-		total += 1 + nesting
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "catch_clause":
-		total += 1
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "ternary_expression":
-		total += 1 + nesting
-		total += walkChildrenWithNesting(n, src, nesting)
-		return total
-	case "call_expression":
-		// Promise-chain .catch() contributes +1 per occurrence.
-		if isDotCatchCall(n, src) {
-			total += 1
-		}
-		// Keep descending to count stuff inside the arguments.
-		for i := 0; i < int(n.ChildCount()); i++ {
-			total += walkComplexity(n.Child(i), src, nesting)
-		}
-		return total
-	case "arrow_function", "function_expression", "function_declaration",
-		"method_definition", "generator_function", "generator_function_declaration":
+	if isFunctionLikeNode(n.Type()) {
 		// A nested function has its own complexity tracked separately (as a
 		// distinct entry from collectFunctions). Don't add the inner
 		// complexity to the outer function.
 		return 0
 	}
+	switch n.Type() {
+	case "if_statement":
+		return ifComplexity(n, src, nesting)
+	case "for_statement", "for_in_statement", "for_of_statement", "while_statement":
+		return loopComplexity(n, src, nesting)
+	case "switch_statement":
+		return 1 + nesting + countNonEmptyCases(n) + walkChildrenWithNesting(n, src, nesting)
+	case "try_statement", "ternary_expression":
+		return 1 + nesting + walkChildrenWithNesting(n, src, nesting)
+	case "catch_clause":
+		return 1 + walkChildrenWithNesting(n, src, nesting)
+	case "call_expression":
+		return callComplexity(n, src, nesting)
+	}
+	return walkAllChildren(n, src, nesting)
+}
 
-	// Descend into children without adjusting nesting.
+// ifComplexity scores an if_statement, charging +1+nesting for the branch,
+// +1 per logical operator switch in the condition, and +1 if an `else`
+// alternative is attached.
+func ifComplexity(n *sitter.Node, src []byte, nesting int) int {
+	total := 1 + nesting + conditionLogicalOps(n.ChildByFieldName("condition"))
+	if n.ChildByFieldName("alternative") != nil {
+		total += 1
+	}
+	return total + walkChildrenWithNesting(n, src, nesting)
+}
+
+// loopComplexity scores any for_*/while_ loop: +1+nesting for the loop plus
+// logical-operator switches inside its condition.
+func loopComplexity(n *sitter.Node, src []byte, nesting int) int {
+	total := 1 + nesting + conditionLogicalOps(n.ChildByFieldName("condition"))
+	return total + walkChildrenWithNesting(n, src, nesting)
+}
+
+// callComplexity charges +1 for promise-chain `.catch(` calls and keeps
+// descending into the call's arguments.
+func callComplexity(n *sitter.Node, src []byte, nesting int) int {
+	total := 0
+	if isDotCatchCall(n, src) {
+		total += 1
+	}
+	return total + walkAllChildren(n, src, nesting)
+}
+
+// walkAllChildren descends into every child at the current nesting level.
+// Used for pass-through node types that don't introduce a nesting penalty.
+func walkAllChildren(n *sitter.Node, src []byte, nesting int) int {
+	total := 0
 	for i := 0; i < int(n.ChildCount()); i++ {
 		total += walkComplexity(n.Child(i), src, nesting)
 	}
 	return total
+}
+
+// isFunctionLikeNode reports whether a tree-sitter node type declares a
+// fresh function scope whose body should be scored independently.
+func isFunctionLikeNode(kind string) bool {
+	switch kind {
+	case "arrow_function", "function_expression", "function_declaration",
+		"method_definition", "generator_function", "generator_function_declaration":
+		return true
+	}
+	return false
 }
 
 // walkChildrenWithNesting recurses into the sub-trees that belong to the

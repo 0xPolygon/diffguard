@@ -96,6 +96,24 @@ func isTSTestFile(path string) bool {
 	return tail == "test" || tail == "spec"
 }
 
+// detectionSkipDirs are heavy/noisy dirs we never want to traverse during
+// TS detection — framework build caches and output directories are included
+// so that generated .ts files don't trigger detection.
+var detectionSkipDirs = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+	"dist":         true,
+	"build":        true,
+	"out":          true,
+	"coverage":     true,
+	".next":        true,
+	".nuxt":        true,
+	".output":      true,
+	".svelte-kit":  true,
+	".turbo":       true,
+	".cache":       true,
+}
+
 // hasTSFile reports whether the tree rooted at root contains at least one
 // file whose extension matches a registered TS extension. Exposed via the
 // detector hook so the language only activates on repos that actually
@@ -108,14 +126,7 @@ func hasTSFile(root string) bool {
 			return nil
 		}
 		if d.IsDir() {
-			// Common heavy/noisy dirs we never want to traverse —
-			// framework build caches and output directories are included
-			// so that generated .ts files don't trigger detection.
-			name := d.Name()
-			if name == "node_modules" || name == ".git" || name == "dist" ||
-				name == "build" || name == "out" || name == "coverage" ||
-				name == ".next" || name == ".nuxt" || name == ".output" ||
-				name == ".svelte-kit" || name == ".turbo" || name == ".cache" {
+			if detectionSkipDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil

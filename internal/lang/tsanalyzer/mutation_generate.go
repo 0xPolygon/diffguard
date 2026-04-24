@@ -71,6 +71,32 @@ func mutantsFor(file string, line int, n *sitter.Node, src []byte) []lang.Mutant
 	return nil
 }
 
+// binaryFlips covers conditional_boundary + negate_conditional +
+// math_operator: same flip table as the Rust analyzer, extended with the
+// TS-strict variants.
+var binaryFlips = map[string]string{
+	">":   ">=",
+	"<":   "<=",
+	">=":  ">",
+	"<=":  "<",
+	"==":  "!=",
+	"!=":  "==",
+	"===": "!==",
+	"!==": "===",
+	"+":   "-",
+	"-":   "+",
+	"*":   "/",
+	"/":   "*",
+}
+
+// strictEqualityFlips toggle strictness independently of inversion.
+var strictEqualityFlips = map[string]string{
+	"===": "==",
+	"==":  "===",
+	"!==": "!=",
+	"!=":  "!==",
+}
+
 // binaryMutants covers conditional_boundary, negate_conditional,
 // math_operator, strict_equality, and nullish_to_logical_or.
 //
@@ -91,64 +117,31 @@ func binaryMutants(file string, line int, n *sitter.Node, _ []byte) []lang.Mutan
 		return nil
 	}
 	op := opNode.Type()
-
 	var out []lang.MutantSite
-
-	// conditional_boundary + negate_conditional + math_operator: same flip
-	// table as the Rust analyzer, extended with the TS-strict variants.
-	flips := map[string]string{
-		">":   ">=",
-		"<":   "<=",
-		">=":  ">",
-		"<=":  "<",
-		"==":  "!=",
-		"!=":  "==",
-		"===": "!==",
-		"!==": "===",
-		"+":   "-",
-		"-":   "+",
-		"*":   "/",
-		"/":   "*",
+	if newOp, ok := binaryFlips[op]; ok {
+		out = append(out, newMutantSite(file, line, op, newOp, binaryOperatorName(op, newOp)))
 	}
-	if newOp, ok := flips[op]; ok {
-		out = append(out, lang.MutantSite{
-			File:        file,
-			Line:        line,
-			Description: fmt.Sprintf("%s -> %s", op, newOp),
-			Operator:    binaryOperatorName(op, newOp),
-		})
+	if newOp, ok := strictEqualityFlips[op]; ok {
+		out = append(out, newMutantSite(file, line, op, newOp, "strict_equality"))
 	}
-
-	// strict_equality: toggle strictness independently of inversion.
-	strictFlips := map[string]string{
-		"===": "==",
-		"==":  "===",
-		"!==": "!=",
-		"!=":  "!==",
-	}
-	if newOp, ok := strictFlips[op]; ok {
-		out = append(out, lang.MutantSite{
-			File:        file,
-			Line:        line,
-			Description: fmt.Sprintf("%s -> %s", op, newOp),
-			Operator:    "strict_equality",
-		})
-	}
-
 	// nullish_to_logical_or: `??` -> `||`. We don't emit the reverse
 	// because `||` doesn't distinguish null/undefined from falsy, so
 	// flipping `||` -> `??` would produce a tautological mutant on
 	// non-nullable code.
 	if op == "??" {
-		out = append(out, lang.MutantSite{
-			File:        file,
-			Line:        line,
-			Description: "?? -> ||",
-			Operator:    "nullish_to_logical_or",
-		})
+		out = append(out, newMutantSite(file, line, "??", "||", "nullish_to_logical_or"))
 	}
-
 	return out
+}
+
+// newMutantSite builds a MutantSite for a "from -> to" operator swap.
+func newMutantSite(file string, line int, from, to, operator string) lang.MutantSite {
+	return lang.MutantSite{
+		File:        file,
+		Line:        line,
+		Description: fmt.Sprintf("%s -> %s", from, to),
+		Operator:    operator,
+	}
 }
 
 // binaryOperatorName classifies a source/target operator pair into the
@@ -313,8 +306,16 @@ func optionalChainMutants(file string, line int, n *sitter.Node, src []byte) []l
 // model this differently (anonymous child vs named `optional_chain`), so
 // we look at the literal source text between the object and the property.
 func hasOptionalChainToken(n *sitter.Node, src []byte) bool {
-	// Fast path: some grammars expose a child whose Type() is literally
-	// "optional_chain" or "?.".
+	if hasOptionalChainChild(n) {
+		return true
+	}
+	_, ok := optionalChainTokenOffset(n, src)
+	return ok
+}
+
+// hasOptionalChainChild checks the fast path: some grammar versions expose
+// an explicit child whose Type() is literally "optional_chain" or "?.".
+func hasOptionalChainChild(n *sitter.Node) bool {
 	for i := 0; i < int(n.ChildCount()); i++ {
 		c := n.Child(i)
 		if c == nil {
@@ -324,24 +325,30 @@ func hasOptionalChainToken(n *sitter.Node, src []byte) bool {
 			return true
 		}
 	}
-	// Fallback: inspect the raw bytes between object.EndByte and
-	// property.StartByte for the literal `?.` token. tree-sitter stores
-	// them as contiguous source, so a simple substring check works.
+	return false
+}
+
+// optionalChainTokenOffset scans the raw bytes between a member_expression's
+// object and property for the literal `?.` token and returns its absolute
+// start offset. Used both for detection (hasOptionalChainToken) and for
+// applying the mutation (applyOptionalChainRemoval) so the two stay in sync
+// across grammar versions.
+func optionalChainTokenOffset(n *sitter.Node, src []byte) (uint32, bool) {
 	obj := n.ChildByFieldName("object")
 	prop := n.ChildByFieldName("property")
 	if obj == nil || prop == nil {
-		return false
+		return 0, false
 	}
 	start := obj.EndByte()
 	end := prop.StartByte()
 	if end <= start || int(end) > len(src) {
-		return false
+		return 0, false
 	}
 	between := src[start:end]
 	for i := 0; i+1 < len(between); i++ {
 		if between[i] == '?' && between[i+1] == '.' {
-			return true
+			return start + uint32(i), true
 		}
 	}
-	return false
+	return 0, false
 }

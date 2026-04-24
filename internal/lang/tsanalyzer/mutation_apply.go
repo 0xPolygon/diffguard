@@ -2,6 +2,7 @@ package tsanalyzer
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -86,11 +87,7 @@ func findOnLine(root *sitter.Node, line int, pred func(*sitter.Node) bool) *sitt
 
 // replaceRange returns src with [start, end) replaced by `with`.
 func replaceRange(src []byte, start, end uint32, with []byte) []byte {
-	out := make([]byte, 0, len(src)-int(end-start)+len(with))
-	out = append(out, src[:start]...)
-	out = append(out, with...)
-	out = append(out, src[end:]...)
-	return out
+	return slices.Concat(src[:start], with, src[end:])
 }
 
 // applyBinary swaps the operator of a binary_expression on the target
@@ -243,43 +240,20 @@ func applyStatementDeletion(root *sitter.Node, src []byte, site lang.MutantSite)
 
 // applyOptionalChainRemoval replaces a `?.` token between the object and
 // property of a member_expression on the target line with a plain `.`.
-// We search for the literal `?.` in the bytes between the two nodes rather
-// than rely on a specific grammar-version node shape.
+// Token scanning is delegated to optionalChainTokenOffset so detection and
+// application share one implementation.
 func applyOptionalChainRemoval(root *sitter.Node, src []byte, site lang.MutantSite) []byte {
 	n := findOnLine(root, site.Line, func(n *sitter.Node) bool {
-		if n.Type() != "member_expression" {
-			return false
-		}
-		return hasOptionalChainToken(n, src)
+		return n.Type() == "member_expression" && hasOptionalChainToken(n, src)
 	})
 	if n == nil {
 		return nil
 	}
-	obj := n.ChildByFieldName("object")
-	prop := n.ChildByFieldName("property")
-	if obj == nil || prop == nil {
+	tokenStart, ok := optionalChainTokenOffset(n, src)
+	if !ok {
 		return nil
 	}
-	start := obj.EndByte()
-	end := prop.StartByte()
-	if end <= start || int(end) > len(src) {
-		return nil
-	}
-	between := src[start:end]
-	idx := -1
-	for i := 0; i+1 < len(between); i++ {
-		if between[i] == '?' && between[i+1] == '.' {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return nil
-	}
-	// Replace the `?.` with a single `.` — drop the `?` only.
-	tokenStart := start + uint32(idx)
-	tokenEnd := tokenStart + 2
-	return replaceRange(src, tokenStart, tokenEnd, []byte("."))
+	return replaceRange(src, tokenStart, tokenStart+2, []byte("."))
 }
 
 // isValidTS re-parses the mutated source with the grammar matching the

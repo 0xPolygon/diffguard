@@ -9,9 +9,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/0xPolygon/diffguard/internal/lang"
 )
+
+// cancelWaitDelay bounds how long cmd.Wait() can block after the context
+// is canceled. Process-group kill (see configureProcessGroup) should
+// reap descendants immediately on unix; this is a cross-platform safety
+// net so pipes inherited by any orphan are force-closed.
+const cancelWaitDelay = 2 * time.Second
 
 // testRunnerImpl implements lang.TestRunner for TypeScript using the
 // project's configured test runner (vitest, jest, or `npm test`). Same
@@ -75,10 +82,7 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 
 	// Defer restore BEFORE writing so a panic between write and run can't
 	// leave corrupt source behind.
-	restore := func() {
-		_ = os.WriteFile(cfg.OriginalFile, originalBytes, 0644)
-	}
-	defer restore()
+	defer func() { _ = os.WriteFile(cfg.OriginalFile, originalBytes, 0644) }()
 
 	if err := os.WriteFile(cfg.OriginalFile, mutantBytes, 0644); err != nil {
 		return false, "", fmt.Errorf("writing mutant over original: %w", err)
@@ -91,26 +95,32 @@ func (r *testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	killed, output := r.runCommand(ctx, cfg)
+	return killed, output, nil
+}
+
+// runCommand spawns the test runner under ctx, captures combined stdout +
+// stderr, and reports whether the mutant was killed. A non-zero exit or a
+// context-deadline cancellation both count as killed; only a clean exit
+// means the mutant survived.
+func (r *testRunnerImpl) runCommand(ctx context.Context, cfg lang.TestRunConfig) (bool, string) {
 	cmdName, args := r.buildCommand(cfg)
 	cmd := exec.CommandContext(ctx, cmdName, args...)
-	configureProcessKill(cmd)
 	cmd.Dir = cfg.RepoPath
 	// CI=true suppresses interactive prompts from jest/vitest.
 	cmd.Env = append(os.Environ(), "CI=true")
+	configureProcessGroup(cmd)
+	cmd.WaitDelay = cancelWaitDelay
 	var combined bytes.Buffer
 	cmd.Stdout = &combined
 	cmd.Stderr = &combined
 
 	runErr := cmd.Run()
 	output := combined.String()
-
-	if ctx.Err() == context.DeadlineExceeded {
-		return true, output, nil
+	if ctx.Err() == context.DeadlineExceeded || runErr != nil {
+		return true, output
 	}
-	if runErr != nil {
-		return true, output, nil
-	}
-	return false, output, nil
+	return false, output
 }
 
 // buildCommand returns the argv to execute for this RunTest call.
