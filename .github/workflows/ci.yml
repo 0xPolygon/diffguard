@@ -21,6 +21,20 @@ jobs:
           go-version: '1.26.1'
           cache: true
 
+      # Node is required by the TS mutation evals (npm test -> vitest /
+      # node). Minimum 22.6 so `--experimental-strip-types` is default.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package.json', '**/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
       - name: Build
         run: go build ./...
 
@@ -29,6 +43,11 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Eval — TypeScript (EVAL-3)
+        env:
+          CI: "true"
+        run: make eval-ts
 
   diffguard:
     # Dogfooding: run diffguard's own quality gate against this repo.
