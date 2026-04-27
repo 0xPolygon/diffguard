@@ -114,6 +114,33 @@ diffguard \
 
 **Generated-file skipping (`--skip-generated`):** Enabled by default. Files marked with a standard generated-code banner such as `Code generated ... DO NOT EDIT` are excluded before they reach any analyzer. Pass `--skip-generated=false` to include them.
 
+### Rust notes
+
+`cargo` must be on `PATH` for mutation testing. The Rust analyzer activates when the repo has a `Cargo.toml` AND at least one `.rs` file. Test files (`tests/**/*.rs`, anything under a `#[cfg(test)]` module, or files with `_test.rs` / `_tests.rs` suffixes) are excluded from mutation. Mutation testing uses per-mutant temp-copies of the crate directory with isolated `target/` dirs — first-run `cargo test` populates `~/.cargo` and is slowest; subsequent mutants reuse the shared cargo cache. Set `CARGO_INCREMENTAL=0` in CI for determinism.
+
+### Rust example
+
+```bash
+# Go install once
+go install github.com/0xPolygon/diffguard/cmd/diffguard@latest
+
+# From your Rust repo, PR-style diff mode with a 20% mutation sample
+cd /path/to/rust-repo
+diffguard --mutation-sample-rate 20 --base origin/main .
+
+# Or scope to specific subdirectories/crates in refactoring mode
+diffguard --paths src/parser/,src/codegen/ .
+```
+
+In GitHub Actions, add `dtolnay/rust-toolchain@stable` to the [Per-PR gate workflow](#github-actions) below so `cargo test` is available when diffguard spawns mutant runs. The extra step, inserted after `actions/setup-go`:
+
+```yaml
+- uses: dtolnay/rust-toolchain@stable
+- run: cargo fetch   # warms the cargo cache so per-mutant runs aren't cold-starts
+env:
+  CARGO_INCREMENTAL: '0'
+```
+
 ### TypeScript notes
 
 `node` and `npm` (or `npx`) must be on `PATH` for mutation testing. The TypeScript analyzer activates when the repo has a `package.json` AND at least one `.ts` / `.tsx` file, so pure-JS projects are left alone. Test files (`*.test.ts`, `*.spec.ts`, `*.test.tsx`, `*.spec.tsx`, or anything under a `__tests__` / `__mocks__` segment) are excluded from mutation. Test runner selection: `npx vitest run` → `npx jest` → `npm test`, auto-detected from `package.json`. Mutation testing spawns the detected runner once per mutant, so expect TS runs to take longer than Go runs (node startup + TS compile per mutant) — use `--mutation-sample-rate` for fast PR feedback.
