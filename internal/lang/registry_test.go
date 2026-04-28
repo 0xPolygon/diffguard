@@ -21,6 +21,7 @@ func (f *fakeLang) MutantGenerator() MutantGenerator          { return nil }
 func (f *fakeLang) MutantApplier() MutantApplier              { return nil }
 func (f *fakeLang) AnnotationScanner() AnnotationScanner      { return nil }
 func (f *fakeLang) TestRunner() TestRunner                    { return nil }
+func (f *fakeLang) DeadCodeDetector() DeadCodeDetector        { return nil }
 
 // Silence the unused-import check — the import is kept so that fakeLang
 // remains plug-compatible with the analyzer interfaces that reference the

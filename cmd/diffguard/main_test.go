@@ -270,6 +270,7 @@ func (s stubLanguage) MutantGenerator() lang.MutantGenerator           { return 
 func (s stubLanguage) MutantApplier() lang.MutantApplier               { return nil }
 func (s stubLanguage) AnnotationScanner() lang.AnnotationScanner       { return nil }
 func (s stubLanguage) TestRunner() lang.TestRunner                     { return nil }
+func (s stubLanguage) DeadCodeDetector() lang.DeadCodeDetector         { return nil }
 
 // initTempGoRepo creates a minimal git repo with a single committed Go
 // file on main, plus an additional file on HEAD so the diff has content.
