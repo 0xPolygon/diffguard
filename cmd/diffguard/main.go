@@ -12,6 +12,7 @@ import (
 
 	"github.com/0xPolygon/diffguard/internal/churn"
 	"github.com/0xPolygon/diffguard/internal/complexity"
+	"github.com/0xPolygon/diffguard/internal/deadcode"
 	"github.com/0xPolygon/diffguard/internal/deps"
 	"github.com/0xPolygon/diffguard/internal/diff"
 	"github.com/0xPolygon/diffguard/internal/lang"
@@ -28,6 +29,7 @@ func main() {
 	flag.IntVar(&cfg.FunctionSizeThreshold, "function-size-threshold", 50, "Maximum lines per function")
 	flag.IntVar(&cfg.FileSizeThreshold, "file-size-threshold", 500, "Maximum lines per file")
 	flag.BoolVar(&cfg.SkipMutation, "skip-mutation", false, "Skip mutation testing")
+	flag.BoolVar(&cfg.SkipDeadCode, "skip-deadcode", false, "Skip dead code (unused symbol) detection")
 	flag.BoolVar(&cfg.SkipGenerated, "skip-generated", true, "Skip files marked as generated (for example `Code generated ... DO NOT EDIT`)")
 	flag.Float64Var(&cfg.MutationSampleRate, "mutation-sample-rate", 100, "Percentage of mutants to test, 0-100")
 	flag.DurationVar(&cfg.TestTimeout, "test-timeout", 30*time.Second, "Per-mutant test binary timeout (e.g. 60s, 2m)")
@@ -70,6 +72,7 @@ type Config struct {
 	FunctionSizeThreshold int
 	FileSizeThreshold     int
 	SkipMutation          bool
+	SkipDeadCode          bool
 	SkipGenerated         bool
 	MutationSampleRate    float64
 	TestTimeout           time.Duration
@@ -291,6 +294,14 @@ func runAnalyses(repoPath string, d *diff.Result, cfg Config, l lang.Language) (
 		return nil, fmt.Errorf("churn analysis: %w", err)
 	}
 	sections = append(sections, churnSection)
+
+	if !cfg.SkipDeadCode {
+		deadcodeSection, err := deadcode.Analyze(repoPath, d, l.DeadCodeDetector())
+		if err != nil {
+			return nil, fmt.Errorf("dead code analysis: %w", err)
+		}
+		sections = append(sections, deadcodeSection)
+	}
 
 	if !cfg.SkipMutation {
 		mutationSection, err := mutation.Analyze(repoPath, d, l, mutation.Options{

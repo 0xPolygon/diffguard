@@ -232,6 +232,14 @@ func TestLanguage_Accessors_ReturnWorkingImpls(t *testing.T) {
 	if tr == nil {
 		t.Fatal("TestRunner returned nil")
 	}
+
+	dd := l.DeadCodeDetector()
+	if dd == nil {
+		t.Fatal("DeadCodeDetector returned nil")
+	}
+	if _, err := dd.FindDeadCode(dir, fc); err != nil {
+		t.Fatalf("FindDeadCode: %v", err)
+	}
 }
 
 // TestScanPackageImports_ParsesAndReportsEdges exercises the happy path and

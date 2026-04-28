@@ -46,6 +46,7 @@ func (*Language) MutantGenerator() lang.MutantGenerator           { return mutan
 func (*Language) MutantApplier() lang.MutantApplier               { return mutantApplierImpl{} }
 func (*Language) AnnotationScanner() lang.AnnotationScanner       { return annotationScannerImpl{} }
 func (*Language) TestRunner() lang.TestRunner                     { return newTestRunner() }
+func (*Language) DeadCodeDetector() lang.DeadCodeDetector         { return deadcodeImpl{} }
 
 // isTSTestFile reports whether path is a TypeScript test file.
 //

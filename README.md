@@ -11,6 +11,7 @@ Diffguard turns "is this code good?" into a set of numbers an agent can iterate 
 - Cognitive complexity ≤ 10 per function
 - Function bodies ≤ 50 lines, files ≤ 500 lines
 - No new dependency cycles or Stable Dependencies Principle violations
+- No unused (dead) symbols introduced by the diff
 - Tier‑1 mutation kill rate ≥ 90% (tests actually catch logic changes)
 
 Run diffguard, read the violations, change the code, run again — loop until it exits 0. The metrics become the spec. The agent has something objective to optimize for rather than guessing at taste, and you get a reproducible definition of "good enough" instead of having to re‑judge every diff by eye. Also useful for traditional human-written CI, but the real lift is on AI-generated PRs where line-by-line review doesn't scale.
@@ -141,6 +142,21 @@ Builds a directed graph of internal package imports from changed packages and re
 
 Cross-references git history with complexity scores. Functions that are both complex AND frequently modified are the highest-risk targets for bugs. Reports the top 10 by `commits * complexity`.
 
+### Dead Code
+
+Flags non-exported functions, variables, and constants that are declared in the diff but have no references in their analyzable scope. Useful for catching code that was added "just in case" but never wired up, or that became orphaned when its sole caller was removed in the same diff.
+
+Scope is deliberately conservative to avoid false positives:
+
+| Language   | Scope scanned for references | Symbols considered                                    |
+|------------|------------------------------|-------------------------------------------------------|
+| Go         | All `*.go` in the package directory (including `_test.go`) | unexported free functions, package-level `var`/`const` |
+| TypeScript | The single source file       | non-`export`ed functions, classes, top-level `const`/`let`/`var` |
+
+Skipped on purpose: exported / public symbols (may be consumed externally), methods (may satisfy interfaces), types (uses through embedding/casting are noisy), and well-known runtime/test entry points (`init`, `main` in `package main`, `TestXxx`, `BenchmarkXxx`, `ExampleXxx`, `FuzzXxx`).
+
+Severity: **WARN**. Dead-code detection is heuristic — symbols can be referenced via reflection, framework registration, or codegen the detector can't see — so findings nudge the reviewer to verify rather than block the build outright. Use `--skip-deadcode` to disable the check entirely.
+
 ### Mutation Testing
 
 Applies mutations to changed code and runs tests to verify they catch the change:
@@ -206,6 +222,7 @@ Flags:
   --function-size-threshold int   Maximum lines per function (default 50)
   --file-size-threshold int       Maximum lines per file (default 500)
   --skip-mutation                 Skip mutation testing
+  --skip-deadcode                 Skip dead code (unused symbol) detection
   --skip-generated                Skip files marked as generated (for example `Code generated ... DO NOT EDIT`) (default true)
   --mutation-sample-rate float    Percentage of mutants to test, 0-100 (default 100)
   --test-timeout duration         Per-mutant go test timeout (default 30s)
@@ -337,6 +354,11 @@ Violations:
 12 functions analyzed | Top churn*complexity score: 440  [WARN]
 Warnings:
   pkg/handler/routes.go:45:HandleRequest                       commits=20 complexity=22 score=440  [WARN]
+
+=== Dead Code ===
+1 unused symbol detected in changed code  [WARN]
+Warnings:
+  pkg/auth/token.go:208:legacyDecode                           unused func "legacyDecode"  [WARN]
 ```
 
 ## License

@@ -154,4 +154,5 @@ func (l *fakeLanguage) MutantApplier() lang.MutantApplier       { return l.appli
 func (l *fakeLanguage) AnnotationScanner() lang.AnnotationScanner {
 	panic("not used")
 }
-func (l *fakeLanguage) TestRunner() lang.TestRunner { return l.runner }
+func (l *fakeLanguage) TestRunner() lang.TestRunner             { return l.runner }
+func (l *fakeLanguage) DeadCodeDetector() lang.DeadCodeDetector { panic("not used") }

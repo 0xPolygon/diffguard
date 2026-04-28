@@ -189,6 +189,35 @@ type TestRunner interface {
 	RunTest(cfg TestRunConfig) (killed bool, output string, err error)
 }
 
+// UnusedSymbol describes a symbol declared in a diff's changed region that
+// has no references within its analyzable scope. Reported by the dead code
+// detector as a warning — false positives are possible (reflective use,
+// frameworks that wire symbols at runtime) so the human is the final judge.
+type UnusedSymbol struct {
+	File string
+	Line int
+	Name string
+	// Kind is the language-agnostic declaration kind: "func", "var", "const",
+	// "type", "class". Languages reuse the same set so the orchestrator can
+	// format a uniform message.
+	Kind string
+}
+
+// DeadCodeDetector finds non-exported symbols declared inside a diff's
+// changed regions that have no references in their analyzable scope. The
+// implementation defines the scope: Go scans the whole package directory
+// (including _test.go files); TypeScript scans the single source file
+// because non-exported symbols there are file-local.
+//
+// The detector is deliberately conservative: it only considers symbols that
+// CANNOT be referenced from outside their scope, so a "no references" result
+// is a real signal rather than a guess. Exported / public symbols, methods
+// (which may satisfy interfaces), and well-known framework hooks (init,
+// main, TestXxx, etc.) are skipped.
+type DeadCodeDetector interface {
+	FindDeadCode(repoPath string, fc diff.FileChange) ([]UnusedSymbol, error)
+}
+
 // Language is the top-level per-language interface. Every language
 // implementation exposes its sub-components through this one type so the
 // orchestrator can iterate `for _, l := range lang.All()` and read out any
@@ -204,4 +233,5 @@ type Language interface {
 	MutantApplier() MutantApplier
 	AnnotationScanner() AnnotationScanner
 	TestRunner() TestRunner
+	DeadCodeDetector() DeadCodeDetector
 }
