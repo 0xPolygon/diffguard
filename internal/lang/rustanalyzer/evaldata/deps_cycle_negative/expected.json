@@ -1,0 +1,9 @@
+{
+  "worst_severity": "PASS",
+  "sections": [
+    {
+      "name": "Dependency Structure",
+      "severity": "PASS"
+    }
+  ]
+}

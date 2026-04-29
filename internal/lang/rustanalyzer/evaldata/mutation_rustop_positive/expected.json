@@ -1,0 +1,9 @@
+{
+  "worst_severity": "PASS",
+  "sections": [
+    {
+      "name": "Mutation Testing",
+      "severity": "PASS"
+    }
+  ]
+}

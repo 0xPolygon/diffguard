@@ -155,7 +155,7 @@ func collectMutants(repoPath string, d *diff.Result, l lang.Language) []Mutant {
 //
 //  1. Prepare: ApplyMutation for every mutant and write the mutated bytes
 //     to a temp file. Runs before any RunTest so ApplyMutation always sees
-//     pristine source on disk — critical for temp-copy runners (TypeScript)
+//     pristine source on disk — critical for temp-copy runners (Rust, TS)
 //     that swap the mutant over the real file during RunTest. If we
 //     interleaved apply + test, a concurrent worker's ApplyMutation could
 //     read a file that another worker's RunTest had temporarily mutated,
