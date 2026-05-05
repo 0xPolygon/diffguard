@@ -27,14 +27,14 @@ import (
 // calculator layer (returning nil) so a single malformed file doesn't fail
 // the whole run.
 func Analyze(repoPath string, d *diff.Result, threshold, deltaTolerance int, calc lang.ComplexityCalculator) (report.Section, error) {
-	var results []lang.FunctionComplexity
+	var analyzed []lang.FunctionComplexity
 	for _, fc := range d.Files {
 		absPath := filepath.Join(repoPath, fc.Path)
 		fnResults, err := calc.AnalyzeFile(absPath, fc)
 		if err != nil {
 			return report.Section{}, fmt.Errorf("analyzing %s: %w", fc.Path, err)
 		}
-		results = append(results, fnResults...)
+		analyzed = append(analyzed, fnResults...)
 	}
 
 	// Delta gating: in diff mode, drop pre-existing violations so PRs aren't
@@ -44,14 +44,18 @@ func Analyze(repoPath string, d *diff.Result, threshold, deltaTolerance int, cal
 	// this branch). Refactoring mode (CollectPaths) leaves MergeBase empty
 	// and falls through to absolute thresholds.
 	//
-	// deltas tracks (file, name) -> base complexity for findings that survive
-	// the filter, so the section can render head/base/Δ in the message.
+	// `candidates` is the subset of analyzed functions eligible to become
+	// findings; `analyzed` stays full so the section's mean / median / max /
+	// total stats describe everything in the diff, not just the worsened
+	// subset. deltas tracks (file, name) -> base complexity for those
+	// candidates that existed at base, so the message shows head/base/Δ.
+	candidates := analyzed
 	var deltas map[string]map[string]int
 	if d.MergeBase != "" {
-		results, deltas = applyDeltaFilter(repoPath, d, results, calc, deltaTolerance)
+		candidates, deltas = applyDeltaFilter(repoPath, d, analyzed, calc, deltaTolerance)
 	}
 
-	return buildSection(results, threshold, deltas), nil
+	return buildSection(analyzed, candidates, threshold, deltas), nil
 }
 
 // applyDeltaFilter drops findings whose complexity at the merge-base was
@@ -172,8 +176,13 @@ func formatComplexityMsg(r lang.FunctionComplexity, deltas map[string]map[string
 	return fmt.Sprintf("complexity=%d (+%d vs base)", r.Complexity, r.Complexity-base)
 }
 
-func buildSection(results []lang.FunctionComplexity, threshold int, deltas map[string]map[string]int) report.Section {
-	if len(results) == 0 {
+// buildSection renders the section. `analyzed` is every function the
+// per-language calculator returned (used for stats / summary so the report
+// describes the whole diff, not just the worsened subset). `candidates` is
+// the subset eligible to become findings — in refactoring mode the two are
+// the same; in diff mode candidates is the post-delta-filter list.
+func buildSection(analyzed, candidates []lang.FunctionComplexity, threshold int, deltas map[string]map[string]int) report.Section {
+	if len(analyzed) == 0 {
 		return report.Section{
 			Name:     "Cognitive Complexity",
 			Summary:  "No changed functions to analyze",
@@ -181,7 +190,8 @@ func buildSection(results []lang.FunctionComplexity, threshold int, deltas map[s
 		}
 	}
 
-	findings, values, failCount := collectComplexityFindings(results, threshold, deltas)
+	findings, _, failCount := collectComplexityFindings(candidates, threshold, deltas)
+	values := complexityValues(analyzed)
 
 	sev := report.SeverityPass
 	if failCount > 0 {
@@ -190,7 +200,7 @@ func buildSection(results []lang.FunctionComplexity, threshold int, deltas map[s
 
 	m, med := mean(values), median(values)
 	summary := fmt.Sprintf("%d functions analyzed | Mean: %.1f | Median: %.0f | Max: %.0f | %d over threshold (%d)",
-		len(results), m, med, max(values), failCount, threshold)
+		len(analyzed), m, med, max(values), failCount, threshold)
 
 	return report.Section{
 		Name:     "Cognitive Complexity",
@@ -198,7 +208,7 @@ func buildSection(results []lang.FunctionComplexity, threshold int, deltas map[s
 		Severity: sev,
 		Findings: findings,
 		Stats: map[string]any{
-			"total_functions": len(results),
+			"total_functions": len(analyzed),
 			"mean":            math.Round(m*10) / 10,
 			"median":          med,
 			"max":             max(values),
@@ -207,6 +217,14 @@ func buildSection(results []lang.FunctionComplexity, threshold int, deltas map[s
 			"histogram":       report.Histogram(values, []float64{5, 10, 15, 20}),
 		},
 	}
+}
+
+func complexityValues(results []lang.FunctionComplexity) []float64 {
+	values := make([]float64, len(results))
+	for i, r := range results {
+		values[i] = float64(r.Complexity)
+	}
+	return values
 }
 
 func mean(vals []float64) float64 {

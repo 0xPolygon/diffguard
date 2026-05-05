@@ -38,16 +38,21 @@ func Analyze(repoPath string, d *diff.Result, funcThreshold, fileThreshold int, 
 	// >= head lines. Per-file: drop if base lines >= head lines (touching a
 	// 4000-line file without growing it is not a regression).
 	//
-	// The returned delta maps (head only retains entries whose function/file
-	// existed at base) feed the message formatter so PR authors can see
-	// "+10 vs base" alongside the head line count.
+	// candidate{Funcs,Files} is the post-filter subset eligible to become
+	// findings; the original {func,file}Results stay in scope so the section's
+	// summary describes the whole diff, not just the worsened subset. Without
+	// this split, "0 over threshold" tests against an empty list and the
+	// section misreports "No changed functions or files to analyze" when
+	// every legacy violation got correctly filtered out.
+	candidateFuncs := funcResults
+	candidateFiles := fileResults
 	var funcDeltas map[string]map[string]int
 	var fileDeltas map[string]int
 	if d.MergeBase != "" {
-		funcResults, fileResults, funcDeltas, fileDeltas = applySizeDeltaFilter(repoPath, d, funcResults, fileResults, extractor)
+		candidateFuncs, candidateFiles, funcDeltas, fileDeltas = applySizeDeltaFilter(repoPath, d, funcResults, fileResults, extractor)
 	}
 
-	return buildSection(funcResults, fileResults, funcThreshold, fileThreshold, funcDeltas, fileDeltas), nil
+	return buildSection(funcResults, fileResults, candidateFuncs, candidateFiles, funcThreshold, fileThreshold, funcDeltas, fileDeltas), nil
 }
 
 // applySizeDeltaFilter drops per-function and per-file findings whose
@@ -236,7 +241,19 @@ func formatFileSizeMsg(f lang.FileSize, deltas map[string]int) string {
 	return fmt.Sprintf("file=%d lines (+%d vs base)", f.Lines, f.Lines-base)
 }
 
-func buildSection(funcs []lang.FunctionSize, files []lang.FileSize, funcThreshold, fileThreshold int, funcDeltas map[string]map[string]int, fileDeltas map[string]int) report.Section {
+// buildSection renders the section. {func,file}s are everything the language
+// extractor returned (used for stats); candidate{Funcs,Files} is the subset
+// eligible to become findings. In refactoring mode they're identical; in
+// diff mode candidate{Funcs,Files} is the post-delta-filter list.
+func buildSection(
+	funcs []lang.FunctionSize,
+	files []lang.FileSize,
+	candidateFuncs []lang.FunctionSize,
+	candidateFiles []lang.FileSize,
+	funcThreshold, fileThreshold int,
+	funcDeltas map[string]map[string]int,
+	fileDeltas map[string]int,
+) report.Section {
 	if len(funcs) == 0 && len(files) == 0 {
 		return report.Section{
 			Name:     "Code Sizes",
@@ -245,7 +262,7 @@ func buildSection(funcs []lang.FunctionSize, files []lang.FileSize, funcThreshol
 		}
 	}
 
-	findings := append(checkFuncSizes(funcs, funcThreshold, funcDeltas), checkFileSizes(files, fileThreshold, fileDeltas)...)
+	findings := append(checkFuncSizes(candidateFuncs, funcThreshold, funcDeltas), checkFileSizes(candidateFiles, fileThreshold, fileDeltas)...)
 
 	sort.Slice(findings, func(i, j int) bool {
 		return findings[i].Value > findings[j].Value
