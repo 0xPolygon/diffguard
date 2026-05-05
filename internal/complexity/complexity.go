@@ -26,7 +26,7 @@ import (
 // "Cognitive Complexity" report section. Parse errors are swallowed at the
 // calculator layer (returning nil) so a single malformed file doesn't fail
 // the whole run.
-func Analyze(repoPath string, d *diff.Result, threshold int, calc lang.ComplexityCalculator) (report.Section, error) {
+func Analyze(repoPath string, d *diff.Result, threshold, deltaTolerance int, calc lang.ComplexityCalculator) (report.Section, error) {
 	var results []lang.FunctionComplexity
 	for _, fc := range d.Files {
 		absPath := filepath.Join(repoPath, fc.Path)
@@ -39,22 +39,30 @@ func Analyze(repoPath string, d *diff.Result, threshold int, calc lang.Complexit
 
 	// Delta gating: in diff mode, drop pre-existing violations so PRs aren't
 	// blamed for legacy complexity they merely touched. A function over the
-	// threshold is only flagged if its complexity is greater than its value
-	// at the merge-base (or the function is brand new on this branch).
-	// Refactoring mode (CollectPaths) leaves MergeBase empty and falls
-	// through to absolute thresholds.
+	// threshold is only flagged if its complexity grew by more than
+	// deltaTolerance vs. the merge-base (or the function is brand new on
+	// this branch). Refactoring mode (CollectPaths) leaves MergeBase empty
+	// and falls through to absolute thresholds.
+	//
+	// deltas tracks (file, name) -> base complexity for findings that survive
+	// the filter, so the section can render head/base/Δ in the message.
+	var deltas map[string]map[string]int
 	if d.MergeBase != "" {
-		results = applyDeltaFilter(repoPath, d, results, calc)
+		results, deltas = applyDeltaFilter(repoPath, d, results, calc, deltaTolerance)
 	}
 
-	return buildSection(results, threshold), nil
+	return buildSection(results, threshold, deltas), nil
 }
 
 // applyDeltaFilter drops findings whose complexity at the merge-base was
-// already >= the head value — i.e. the diff did not make the function worse.
-// New functions (absent at base) are kept as-is so they're still gated by the
-// absolute threshold downstream.
-func applyDeltaFilter(repoPath string, d *diff.Result, head []lang.FunctionComplexity, calc lang.ComplexityCalculator) []lang.FunctionComplexity {
+// within tolerance of the head value — i.e. the diff did not measurably
+// worsen the function. New functions (absent at base) are kept as-is so
+// they're still gated by the absolute threshold downstream.
+//
+// Returned `deltas` is a (file -> name -> base complexity) map covering only
+// kept findings whose function existed at base, so the report can show the
+// delta alongside the head value.
+func applyDeltaFilter(repoPath string, d *diff.Result, head []lang.FunctionComplexity, calc lang.ComplexityCalculator, tolerance int) ([]lang.FunctionComplexity, map[string]map[string]int) {
 	baseByFile := make(map[string]map[string]int)
 	for _, fc := range d.Files {
 		if base, ok := baseComplexity(repoPath, d.MergeBase, fc.Path, calc); ok {
@@ -63,23 +71,42 @@ func applyDeltaFilter(repoPath string, d *diff.Result, head []lang.FunctionCompl
 	}
 
 	var out []lang.FunctionComplexity
+	deltas := make(map[string]map[string]int)
 	for _, h := range head {
-		if worsened(h, baseByFile[h.File]) {
-			out = append(out, h)
+		baseFuncs := baseByFile[h.File]
+		if !worsened(h, baseFuncs, tolerance) {
+			continue
 		}
+		out = append(out, h)
+		recordDelta(deltas, h, baseFuncs)
 	}
-	return out
+	return out, deltas
+}
+
+// recordDelta stores the base complexity for h in deltas[h.File][h.Name] when
+// the function existed at base. New functions (no entry) are skipped so the
+// report can distinguish them from regressions.
+func recordDelta(deltas map[string]map[string]int, h lang.FunctionComplexity, baseFuncs map[string]int) {
+	base, exists := baseFuncs[h.Name]
+	if !exists {
+		return
+	}
+	if deltas[h.File] == nil {
+		deltas[h.File] = make(map[string]int)
+	}
+	deltas[h.File][h.Name] = base
 }
 
 // worsened reports whether a head finding represents a genuine regression
 // against the base map. A nil/missing entry (function did not exist at base)
 // counts as worsened so brand-new over-threshold functions still fail.
-func worsened(h lang.FunctionComplexity, baseFuncs map[string]int) bool {
+// Otherwise the head value must exceed base by more than tolerance.
+func worsened(h lang.FunctionComplexity, baseFuncs map[string]int, tolerance int) bool {
 	base, exists := baseFuncs[h.Name]
 	if !exists {
 		return true
 	}
-	return h.Complexity > base
+	return h.Complexity > base+tolerance
 }
 
 // baseComplexity returns a name->complexity map for repoRelPath at ref, or
@@ -103,7 +130,7 @@ func baseComplexity(repoPath, ref, repoRelPath string, calc lang.ComplexityCalcu
 	return m, true
 }
 
-func collectComplexityFindings(results []lang.FunctionComplexity, threshold int) ([]report.Finding, []float64, int) {
+func collectComplexityFindings(results []lang.FunctionComplexity, threshold int, deltas map[string]map[string]int) ([]report.Finding, []float64, int) {
 	var findings []report.Finding
 	var values []float64
 	failCount := 0
@@ -118,7 +145,7 @@ func collectComplexityFindings(results []lang.FunctionComplexity, threshold int)
 			File:     r.File,
 			Line:     r.Line,
 			Function: r.Name,
-			Message:  fmt.Sprintf("complexity=%d", r.Complexity),
+			Message:  formatComplexityMsg(r, deltas),
 			Value:    float64(r.Complexity),
 			Limit:    float64(threshold),
 			Severity: report.SeverityFail,
@@ -132,7 +159,20 @@ func collectComplexityFindings(results []lang.FunctionComplexity, threshold int)
 	return findings, values, failCount
 }
 
-func buildSection(results []lang.FunctionComplexity, threshold int) report.Section {
+// formatComplexityMsg renders the per-finding message, appending a
+// "(+Δ vs base)" suffix when delta-gating recorded a baseline value for the
+// function. Brand-new functions (no entry in deltas) get the bare form so
+// PR authors can tell "I added this hot function" from "I made an existing
+// hot function hotter".
+func formatComplexityMsg(r lang.FunctionComplexity, deltas map[string]map[string]int) string {
+	base, ok := deltas[r.File][r.Name]
+	if !ok {
+		return fmt.Sprintf("complexity=%d", r.Complexity)
+	}
+	return fmt.Sprintf("complexity=%d (+%d vs base)", r.Complexity, r.Complexity-base)
+}
+
+func buildSection(results []lang.FunctionComplexity, threshold int, deltas map[string]map[string]int) report.Section {
 	if len(results) == 0 {
 		return report.Section{
 			Name:     "Cognitive Complexity",
@@ -141,7 +181,7 @@ func buildSection(results []lang.FunctionComplexity, threshold int) report.Secti
 		}
 	}
 
-	findings, values, failCount := collectComplexityFindings(results, threshold)
+	findings, values, failCount := collectComplexityFindings(results, threshold, deltas)
 
 	sev := report.SeverityPass
 	if failCount > 0 {

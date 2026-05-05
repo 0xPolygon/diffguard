@@ -27,6 +27,7 @@ import (
 func main() {
 	var cfg Config
 	flag.IntVar(&cfg.ComplexityThreshold, "complexity-threshold", 10, "Maximum cognitive complexity per function")
+	flag.IntVar(&cfg.ComplexityDeltaTolerance, "complexity-delta-tolerance", 3, "In diff mode, ignore complexity regressions where head exceeds base by this much or less; brand-new functions still gated by --complexity-threshold")
 	flag.IntVar(&cfg.FunctionSizeThreshold, "function-size-threshold", 50, "Maximum lines per function")
 	flag.IntVar(&cfg.FileSizeThreshold, "file-size-threshold", 500, "Maximum lines per file")
 	flag.BoolVar(&cfg.SkipMutation, "skip-mutation", false, "Skip mutation testing")
@@ -69,9 +70,10 @@ func main() {
 
 // Config holds CLI configuration.
 type Config struct {
-	ComplexityThreshold   int
-	FunctionSizeThreshold int
-	FileSizeThreshold     int
+	ComplexityThreshold      int
+	ComplexityDeltaTolerance int
+	FunctionSizeThreshold    int
+	FileSizeThreshold        int
 	SkipMutation          bool
 	SkipDeadCode          bool
 	SkipGenerated         bool
@@ -272,7 +274,7 @@ func announceRun(d *diff.Result, cfg Config, l lang.Language, numLanguages int) 
 func runAnalyses(repoPath string, d *diff.Result, cfg Config, l lang.Language) ([]report.Section, error) {
 	var sections []report.Section
 
-	complexitySection, err := complexity.Analyze(repoPath, d, cfg.ComplexityThreshold, l.ComplexityCalculator())
+	complexitySection, err := complexity.Analyze(repoPath, d, cfg.ComplexityThreshold, cfg.ComplexityDeltaTolerance, l.ComplexityCalculator())
 	if err != nil {
 		return nil, fmt.Errorf("complexity analysis: %w", err)
 	}

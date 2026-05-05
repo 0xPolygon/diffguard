@@ -134,6 +134,92 @@ func TestGrewFile(t *testing.T) {
 	}
 }
 
+func TestFormatFuncSizeMsg(t *testing.T) {
+	mk := func(file, name string, lines int) lang.FunctionSize {
+		return lang.FunctionSize{
+			FunctionInfo: lang.FunctionInfo{File: file, Name: name},
+			Lines:        lines,
+		}
+	}
+	cases := []struct {
+		name   string
+		fn     lang.FunctionSize
+		deltas map[string]map[string]int
+		want   string
+	}{
+		{
+			name:   "no_baseline_bare_message",
+			fn:     mk("a.go", "f", 80),
+			deltas: nil,
+			want:   "function=80 lines",
+		},
+		{
+			name:   "no_entry_for_function",
+			fn:     mk("a.go", "f", 80),
+			deltas: map[string]map[string]int{"a.go": {"other": 5}},
+			want:   "function=80 lines",
+		},
+		{
+			name:   "renders_positive_delta",
+			fn:     mk("a.go", "f", 80),
+			deltas: map[string]map[string]int{"a.go": {"f": 70}},
+			want:   "function=80 lines (+10 vs base)",
+		},
+		{
+			// Lock subtraction direction (head - base).
+			name:   "subtraction_not_addition",
+			fn:     mk("a.go", "f", 100),
+			deltas: map[string]map[string]int{"a.go": {"f": 95}},
+			want:   "function=100 lines (+5 vs base)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatFuncSizeMsg(tc.fn, tc.deltas); got != tc.want {
+				t.Errorf("formatFuncSizeMsg = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatFileSizeMsg(t *testing.T) {
+	mk := func(path string, lines int) lang.FileSize {
+		return lang.FileSize{Path: path, Lines: lines}
+	}
+	cases := []struct {
+		name   string
+		f      lang.FileSize
+		deltas map[string]int
+		want   string
+	}{
+		{
+			name:   "no_baseline_bare_message",
+			f:      mk("big.go", 600),
+			deltas: nil,
+			want:   "file=600 lines",
+		},
+		{
+			name:   "no_entry_for_path",
+			f:      mk("big.go", 600),
+			deltas: map[string]int{"other.go": 100},
+			want:   "file=600 lines",
+		},
+		{
+			name:   "renders_positive_delta",
+			f:      mk("big.go", 600),
+			deltas: map[string]int{"big.go": 580},
+			want:   "file=600 lines (+20 vs base)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatFileSizeMsg(tc.f, tc.deltas); got != tc.want {
+				t.Errorf("formatFileSizeMsg = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSizesDelta_FunctionUnchangedDropped: legacy oversized function, only a
 // comment inside is touched by the PR. Line count unchanged → drop.
 func TestSizesDelta_FunctionUnchangedDropped(t *testing.T) {

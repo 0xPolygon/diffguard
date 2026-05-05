@@ -37,11 +37,17 @@ func Analyze(repoPath string, d *diff.Result, funcThreshold, fileThreshold int, 
 	// blamed for size violations it caused. Per-function: drop if base lines
 	// >= head lines. Per-file: drop if base lines >= head lines (touching a
 	// 4000-line file without growing it is not a regression).
+	//
+	// The returned delta maps (head only retains entries whose function/file
+	// existed at base) feed the message formatter so PR authors can see
+	// "+10 vs base" alongside the head line count.
+	var funcDeltas map[string]map[string]int
+	var fileDeltas map[string]int
 	if d.MergeBase != "" {
-		funcResults, fileResults = applySizeDeltaFilter(repoPath, d, funcResults, fileResults, extractor)
+		funcResults, fileResults, funcDeltas, fileDeltas = applySizeDeltaFilter(repoPath, d, funcResults, fileResults, extractor)
 	}
 
-	return buildSection(funcResults, fileResults, funcThreshold, fileThreshold), nil
+	return buildSection(funcResults, fileResults, funcThreshold, fileThreshold, funcDeltas, fileDeltas), nil
 }
 
 // applySizeDeltaFilter drops per-function and per-file findings whose
@@ -54,38 +60,68 @@ func applySizeDeltaFilter(
 	headFuncs []lang.FunctionSize,
 	headFiles []lang.FileSize,
 	extractor lang.FunctionExtractor,
-) ([]lang.FunctionSize, []lang.FileSize) {
+) ([]lang.FunctionSize, []lang.FileSize, map[string]map[string]int, map[string]int) {
 	byFile := make(map[string]baseSizes)
 	for _, fc := range d.Files {
 		byFile[fc.Path] = baseSizesFor(repoPath, d.MergeBase, fc.Path, extractor)
 	}
-	return filterFuncSizes(headFuncs, byFile), filterFileSizes(headFiles, byFile)
+	keptFuncs, funcDeltas := filterFuncSizes(headFuncs, byFile)
+	keptFiles, fileDeltas := filterFileSizes(headFiles, byFile)
+	return keptFuncs, keptFiles, funcDeltas, fileDeltas
 }
 
 // filterFuncSizes drops per-function findings whose base-side line count was
-// already >= the head-side count (no growth this PR).
-func filterFuncSizes(head []lang.FunctionSize, byFile map[string]baseSizes) []lang.FunctionSize {
+// already >= the head-side count (no growth this PR). Returns both the kept
+// findings and a delta map (file -> name -> base lines) so the message
+// formatter can render "+N vs base" alongside the head value.
+func filterFuncSizes(head []lang.FunctionSize, byFile map[string]baseSizes) ([]lang.FunctionSize, map[string]map[string]int) {
 	var out []lang.FunctionSize
+	deltas := make(map[string]map[string]int)
 	for _, h := range head {
-		if !grewFunc(h, byFile[h.File]) {
+		b := byFile[h.File]
+		if !grewFunc(h, b) {
 			continue
 		}
 		out = append(out, h)
+		recordFuncDelta(deltas, h, b)
 	}
-	return out
+	return out, deltas
+}
+
+// recordFuncDelta records the base line count for a kept finding so the
+// report can render "+N vs base". Brand-new functions (no base entry) skip
+// the record so the message stays bare.
+func recordFuncDelta(deltas map[string]map[string]int, h lang.FunctionSize, b baseSizes) {
+	if !b.ok {
+		return
+	}
+	base, exists := b.funcs[h.Name]
+	if !exists {
+		return
+	}
+	if deltas[h.File] == nil {
+		deltas[h.File] = make(map[string]int)
+	}
+	deltas[h.File][h.Name] = base
 }
 
 // filterFileSizes drops per-file findings whose whole-file line count was
-// already >= the head-side count.
-func filterFileSizes(head []lang.FileSize, byFile map[string]baseSizes) []lang.FileSize {
+// already >= the head-side count. Returns kept findings + a path -> base
+// lines map for delta-aware message formatting.
+func filterFileSizes(head []lang.FileSize, byFile map[string]baseSizes) ([]lang.FileSize, map[string]int) {
 	var out []lang.FileSize
+	deltas := make(map[string]int)
 	for _, h := range head {
-		if !grewFile(h, byFile[h.Path]) {
+		b := byFile[h.Path]
+		if !grewFile(h, b) {
 			continue
 		}
 		out = append(out, h)
+		if b.ok {
+			deltas[h.Path] = b.file
+		}
 	}
-	return out
+	return out, deltas
 }
 
 // grewFunc reports whether a function-size finding represents real growth on
@@ -145,7 +181,7 @@ func baseSizesFor(repoPath, ref, repoRelPath string, extractor lang.FunctionExtr
 	return out
 }
 
-func checkFuncSizes(funcs []lang.FunctionSize, threshold int) []report.Finding {
+func checkFuncSizes(funcs []lang.FunctionSize, threshold int, deltas map[string]map[string]int) []report.Finding {
 	var findings []report.Finding
 	for _, f := range funcs {
 		if f.Lines > threshold {
@@ -153,7 +189,7 @@ func checkFuncSizes(funcs []lang.FunctionSize, threshold int) []report.Finding {
 				File:     f.File,
 				Line:     f.Line,
 				Function: f.Name,
-				Message:  fmt.Sprintf("function=%d lines", f.Lines),
+				Message:  formatFuncSizeMsg(f, deltas),
 				Value:    float64(f.Lines),
 				Limit:    float64(threshold),
 				Severity: report.SeverityFail,
@@ -163,13 +199,13 @@ func checkFuncSizes(funcs []lang.FunctionSize, threshold int) []report.Finding {
 	return findings
 }
 
-func checkFileSizes(files []lang.FileSize, threshold int) []report.Finding {
+func checkFileSizes(files []lang.FileSize, threshold int, deltas map[string]int) []report.Finding {
 	var findings []report.Finding
 	for _, f := range files {
 		if f.Lines > threshold {
 			findings = append(findings, report.Finding{
 				File:     f.Path,
-				Message:  fmt.Sprintf("file=%d lines", f.Lines),
+				Message:  formatFileSizeMsg(f, deltas),
 				Value:    float64(f.Lines),
 				Limit:    float64(threshold),
 				Severity: report.SeverityFail,
@@ -179,7 +215,28 @@ func checkFileSizes(files []lang.FileSize, threshold int) []report.Finding {
 	return findings
 }
 
-func buildSection(funcs []lang.FunctionSize, files []lang.FileSize, funcThreshold, fileThreshold int) report.Section {
+// formatFuncSizeMsg renders the per-function size message with a "+Δ vs
+// base" suffix when the function existed at base. New functions get the
+// bare form so the report distinguishes "added a 200-line function" from
+// "made an existing 195-line function 200 lines".
+func formatFuncSizeMsg(f lang.FunctionSize, deltas map[string]map[string]int) string {
+	base, ok := deltas[f.File][f.Name]
+	if !ok {
+		return fmt.Sprintf("function=%d lines", f.Lines)
+	}
+	return fmt.Sprintf("function=%d lines (+%d vs base)", f.Lines, f.Lines-base)
+}
+
+// formatFileSizeMsg mirrors formatFuncSizeMsg for whole-file size.
+func formatFileSizeMsg(f lang.FileSize, deltas map[string]int) string {
+	base, ok := deltas[f.Path]
+	if !ok {
+		return fmt.Sprintf("file=%d lines", f.Lines)
+	}
+	return fmt.Sprintf("file=%d lines (+%d vs base)", f.Lines, f.Lines-base)
+}
+
+func buildSection(funcs []lang.FunctionSize, files []lang.FileSize, funcThreshold, fileThreshold int, funcDeltas map[string]map[string]int, fileDeltas map[string]int) report.Section {
 	if len(funcs) == 0 && len(files) == 0 {
 		return report.Section{
 			Name:     "Code Sizes",
@@ -188,7 +245,7 @@ func buildSection(funcs []lang.FunctionSize, files []lang.FileSize, funcThreshol
 		}
 	}
 
-	findings := append(checkFuncSizes(funcs, funcThreshold), checkFileSizes(files, fileThreshold)...)
+	findings := append(checkFuncSizes(funcs, funcThreshold, funcDeltas), checkFileSizes(files, fileThreshold, fileDeltas)...)
 
 	sort.Slice(findings, func(i, j int) bool {
 		return findings[i].Value > findings[j].Value

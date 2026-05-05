@@ -74,7 +74,8 @@ const complexBodyV2 = `	if x > 0 {
 	}`
 
 // parseAndAnalyze runs the same diff.Parse + complexity.Analyze flow main()
-// uses, returning the section so tests can assert on it directly.
+// uses, with delta-tolerance=0 so tests can pin down exact head/base
+// boundaries without the production tolerance hiding small regressions.
 func parseAndAnalyze(t *testing.T, dir, base string) report.Section {
 	t.Helper()
 	calc := goCalc(t)
@@ -92,7 +93,7 @@ func parseAndAnalyze(t *testing.T, dir, base string) report.Section {
 	if err != nil {
 		t.Fatalf("diff.Parse: %v", err)
 	}
-	section, err := Analyze(dir, d, 10, calc)
+	section, err := Analyze(dir, d, 10, 0, calc)
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -184,21 +185,146 @@ func TestWorsened(t *testing.T) {
 		}
 	}
 	cases := []struct {
-		name string
-		h    lang.FunctionComplexity
-		base map[string]int
-		want bool
+		name      string
+		h         lang.FunctionComplexity
+		base      map[string]int
+		tolerance int
+		want      bool
 	}{
-		{"absent_at_base", mk("f", 12), map[string]int{}, true},
-		{"nil_base_map", mk("f", 12), nil, true},
-		{"head_higher", mk("f", 13), map[string]int{"f": 12}, true},
-		{"head_equal", mk("f", 12), map[string]int{"f": 12}, false},
-		{"head_lower", mk("f", 8), map[string]int{"f": 12}, false},
+		{"absent_at_base", mk("f", 12), map[string]int{}, 0, true},
+		{"nil_base_map", mk("f", 12), nil, 0, true},
+		{"head_higher_no_tolerance", mk("f", 13), map[string]int{"f": 12}, 0, true},
+		{"head_equal_no_tolerance", mk("f", 12), map[string]int{"f": 12}, 0, false},
+		{"head_lower", mk("f", 8), map[string]int{"f": 12}, 0, false},
+		// Tolerance-aware cases: head must exceed base by *more than*
+		// tolerance to count as worsened. tolerance=3 means +1, +2, +3 are
+		// all forgiven; +4 is the first regression that fails.
+		{"within_tolerance_lower_bound", mk("f", 13), map[string]int{"f": 12}, 3, false},
+		{"within_tolerance_at_bound", mk("f", 15), map[string]int{"f": 12}, 3, false},
+		{"just_over_tolerance", mk("f", 16), map[string]int{"f": 12}, 3, true},
+		{"new_function_tolerance_irrelevant", mk("g", 8), map[string]int{"f": 12}, 100, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := worsened(tc.h, tc.base); got != tc.want {
+			if got := worsened(tc.h, tc.base, tc.tolerance); got != tc.want {
 				t.Errorf("worsened = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDeltaGating_WithinToleranceDropped covers the production default: a
+// small (+3 or less) regression on a legacy hot function should not block
+// the PR. The function is over the absolute threshold both before and after,
+// but the delta is within tolerance.
+func TestDeltaGating_WithinToleranceDropped(t *testing.T) {
+	dir := initRepo(t)
+	// Base: complexity=21 (six nested ifs).
+	base := "package x\n\nfunc Complex(x int) {\n" + complexBodyV1 + "\n}\n"
+	writeAndCommit(t, dir, "a.go", base, "base")
+
+	runGit(t, dir, "checkout", "-q", "-b", "feature")
+	// Feature: tack one logical operator onto the outermost condition.
+	// Cognitive complexity goes up by exactly 1 (op-type-change counter)
+	// without adding a new branch — well within the production tolerance.
+	feature := `package x
+
+func Complex(x int) {
+	if x > 0 && x < 1<<31 {
+		if x > 10 {
+			if x > 100 {
+				if x > 1000 {
+					if x > 10000 {
+						if x > 100000 {
+							_ = x
+						}
+					}
+				}
+			}
+		}
+	}
+}
+`
+	writeAndCommit(t, dir, "a.go", feature, "tiny bump")
+
+	calc := goCalc(t)
+	l, _ := lang.Get("go")
+	d, err := diff.Parse(dir, "main", diff.Filter{
+		DiffGlobs: l.FileFilter().DiffGlobs,
+		Includes: func(p string) bool {
+			ff := l.FileFilter()
+			if !slices.Contains(ff.Extensions, filepath.Ext(p)) {
+				return false
+			}
+			return !ff.IsTestFile(p)
+		},
+	})
+	if err != nil {
+		t.Fatalf("diff.Parse: %v", err)
+	}
+	// With tolerance=3: +1 regression is forgiven → PASS.
+	s, err := Analyze(dir, d, 10, 3, calc)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if s.Severity != report.SeverityPass {
+		t.Errorf("severity = %v, want PASS (within tolerance); findings=%+v", s.Severity, s.Findings)
+	}
+	// Same data, tolerance=0: same +1 regression now fails. Locks in the
+	// invariant that tolerance-3 is the only thing softening the gate here.
+	s, err = Analyze(dir, d, 10, 0, calc)
+	if err != nil {
+		t.Fatalf("Analyze (tol=0): %v", err)
+	}
+	if s.Severity != report.SeverityFail {
+		t.Errorf("tol=0: severity = %v, want FAIL", s.Severity)
+	}
+}
+
+func TestFormatComplexityMsg(t *testing.T) {
+	mk := func(file, name string, c int) lang.FunctionComplexity {
+		return lang.FunctionComplexity{
+			FunctionInfo: lang.FunctionInfo{File: file, Name: name},
+			Complexity:   c,
+		}
+	}
+	cases := []struct {
+		name   string
+		fn     lang.FunctionComplexity
+		deltas map[string]map[string]int
+		want   string
+	}{
+		{
+			name:   "no_baseline_bare_message",
+			fn:     mk("a.go", "f", 12),
+			deltas: nil,
+			want:   "complexity=12",
+		},
+		{
+			name:   "no_entry_for_function",
+			fn:     mk("a.go", "f", 12),
+			deltas: map[string]map[string]int{"a.go": {"other": 5}},
+			want:   "complexity=12",
+		},
+		{
+			name:   "renders_positive_delta",
+			fn:     mk("a.go", "f", 17),
+			deltas: map[string]map[string]int{"a.go": {"f": 12}},
+			want:   "complexity=17 (+5 vs base)",
+		},
+		{
+			// Locks the subtraction direction: head - base, not the other
+			// way around. (Mutation testing flips operands; this catches it.)
+			name:   "subtraction_not_addition",
+			fn:     mk("a.go", "f", 30),
+			deltas: map[string]map[string]int{"a.go": {"f": 28}},
+			want:   "complexity=30 (+2 vs base)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatComplexityMsg(tc.fn, tc.deltas); got != tc.want {
+				t.Errorf("formatComplexityMsg = %q, want %q", got, tc.want)
 			}
 		})
 	}
