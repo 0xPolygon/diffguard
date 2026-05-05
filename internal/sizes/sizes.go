@@ -15,9 +15,22 @@ import (
 	"github.com/0xPolygon/diffguard/internal/report"
 )
 
+// DeltaTolerances captures the size deltas that diff mode is willing to
+// forgive. A function whose line count grew by FuncLines or fewer is
+// dropped. A file is dropped when its line growth is within
+// max(FileFloorLines, base * FilePct%) — percentage scales with file size
+// so adding 50 lines to a 5000-line file is forgiven while the same growth
+// on a 500-line file is flagged. A zero-value DeltaTolerances acts as
+// strict gating (all growth flagged) to preserve the pre-tolerance default.
+type DeltaTolerances struct {
+	FuncLines      int
+	FilePct        int
+	FileFloorLines int
+}
+
 // Analyze measures lines of code for changed functions and files using the
 // supplied language extractor.
-func Analyze(repoPath string, d *diff.Result, funcThreshold, fileThreshold int, extractor lang.FunctionExtractor) (report.Section, error) {
+func Analyze(repoPath string, d *diff.Result, funcThreshold, fileThreshold int, tol DeltaTolerances, extractor lang.FunctionExtractor) (report.Section, error) {
 	var funcResults []lang.FunctionSize
 	var fileResults []lang.FileSize
 
@@ -49,7 +62,7 @@ func Analyze(repoPath string, d *diff.Result, funcThreshold, fileThreshold int, 
 	var funcDeltas map[string]map[string]int
 	var fileDeltas map[string]int
 	if d.MergeBase != "" {
-		candidateFuncs, candidateFiles, funcDeltas, fileDeltas = applySizeDeltaFilter(repoPath, d, funcResults, fileResults, extractor)
+		candidateFuncs, candidateFiles, funcDeltas, fileDeltas = applySizeDeltaFilter(repoPath, d, funcResults, fileResults, tol, extractor)
 	}
 
 	return buildSection(funcResults, fileResults, candidateFuncs, candidateFiles, funcThreshold, fileThreshold, funcDeltas, fileDeltas), nil
@@ -64,27 +77,28 @@ func applySizeDeltaFilter(
 	d *diff.Result,
 	headFuncs []lang.FunctionSize,
 	headFiles []lang.FileSize,
+	tol DeltaTolerances,
 	extractor lang.FunctionExtractor,
 ) ([]lang.FunctionSize, []lang.FileSize, map[string]map[string]int, map[string]int) {
 	byFile := make(map[string]baseSizes)
 	for _, fc := range d.Files {
 		byFile[fc.Path] = baseSizesFor(repoPath, d.MergeBase, fc.Path, extractor)
 	}
-	keptFuncs, funcDeltas := filterFuncSizes(headFuncs, byFile)
-	keptFiles, fileDeltas := filterFileSizes(headFiles, byFile)
+	keptFuncs, funcDeltas := filterFuncSizes(headFuncs, byFile, tol.FuncLines)
+	keptFiles, fileDeltas := filterFileSizes(headFiles, byFile, tol.FilePct, tol.FileFloorLines)
 	return keptFuncs, keptFiles, funcDeltas, fileDeltas
 }
 
-// filterFuncSizes drops per-function findings whose base-side line count was
-// already >= the head-side count (no growth this PR). Returns both the kept
-// findings and a delta map (file -> name -> base lines) so the message
-// formatter can render "+N vs base" alongside the head value.
-func filterFuncSizes(head []lang.FunctionSize, byFile map[string]baseSizes) ([]lang.FunctionSize, map[string]map[string]int) {
+// filterFuncSizes drops per-function findings whose growth from base is
+// within tolerance lines. Returns both the kept findings and a delta map
+// (file -> name -> base lines) so the message formatter can render "+N vs
+// base" alongside the head value.
+func filterFuncSizes(head []lang.FunctionSize, byFile map[string]baseSizes, tolerance int) ([]lang.FunctionSize, map[string]map[string]int) {
 	var out []lang.FunctionSize
 	deltas := make(map[string]map[string]int)
 	for _, h := range head {
 		b := byFile[h.File]
-		if !grewFunc(h, b) {
+		if !grewFunc(h, b, tolerance) {
 			continue
 		}
 		out = append(out, h)
@@ -110,15 +124,15 @@ func recordFuncDelta(deltas map[string]map[string]int, h lang.FunctionSize, b ba
 	deltas[h.File][h.Name] = base
 }
 
-// filterFileSizes drops per-file findings whose whole-file line count was
-// already >= the head-side count. Returns kept findings + a path -> base
+// filterFileSizes drops per-file findings whose growth is within
+// max(floorLines, base * pct%). Returns kept findings + a path -> base
 // lines map for delta-aware message formatting.
-func filterFileSizes(head []lang.FileSize, byFile map[string]baseSizes) ([]lang.FileSize, map[string]int) {
+func filterFileSizes(head []lang.FileSize, byFile map[string]baseSizes, pct, floorLines int) ([]lang.FileSize, map[string]int) {
 	var out []lang.FileSize
 	deltas := make(map[string]int)
 	for _, h := range head {
 		b := byFile[h.Path]
-		if !grewFile(h, b) {
+		if !grewFile(h, b, pct, floorLines) {
 			continue
 		}
 		out = append(out, h)
@@ -129,10 +143,11 @@ func filterFileSizes(head []lang.FileSize, byFile map[string]baseSizes) ([]lang.
 	return out, deltas
 }
 
-// grewFunc reports whether a function-size finding represents real growth on
-// this branch. Missing baseline (file absent at base, or function not present
-// at base) counts as growth so absolute thresholds still apply.
-func grewFunc(h lang.FunctionSize, b baseSizes) bool {
+// grewFunc reports whether a function's line growth is large enough to
+// flag. Missing baseline (file absent at base, or function not present at
+// base) counts as growth so absolute thresholds still apply to brand-new
+// code; otherwise the head must exceed base by more than tolerance.
+func grewFunc(h lang.FunctionSize, b baseSizes, tolerance int) bool {
 	if !b.ok {
 		return true
 	}
@@ -140,16 +155,37 @@ func grewFunc(h lang.FunctionSize, b baseSizes) bool {
 	if !exists {
 		return true
 	}
-	return h.Lines > base
+	return h.Lines > base+tolerance
 }
 
-// grewFile mirrors grewFunc for whole-file size: missing baseline → growth;
-// otherwise growth iff head exceeds base.
-func grewFile(h lang.FileSize, b baseSizes) bool {
+// grewFile mirrors grewFunc with a percentage-based tolerance: drop if
+// growth ≤ max(floorLines, base * pct%). The floor stops "added 3 lines to
+// a 600-line file" from over-firing on small files; the percentage stops
+// "+50 to a 5000-line file" from over-firing on giant ones.
+func grewFile(h lang.FileSize, b baseSizes, pct, floorLines int) bool {
 	if !b.ok {
 		return true
 	}
-	return h.Lines > b.file
+	delta := h.Lines - b.file
+	if delta <= 0 {
+		return false
+	}
+	return delta > fileGrowthTolerance(b.file, pct, floorLines)
+}
+
+// fileGrowthTolerance returns the larger of floorLines and base * pct / 100
+// (integer arithmetic — pct is already %, so 5% of 1000 = 50). Negative or
+// zero pct collapses to floorLines so callers can disable the percentage
+// component without disabling the absolute floor.
+func fileGrowthTolerance(base, pct, floorLines int) int {
+	pctTolerance := 0
+	if pct > 0 && base > 0 {
+		pctTolerance = base * pct / 100
+	}
+	if pctTolerance > floorLines {
+		return pctTolerance
+	}
+	return floorLines
 }
 
 // baseSizes captures the per-function and whole-file line counts of a single

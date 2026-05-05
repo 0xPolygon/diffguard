@@ -29,7 +29,10 @@ func main() {
 	flag.IntVar(&cfg.ComplexityThreshold, "complexity-threshold", 10, "Maximum cognitive complexity per function")
 	flag.IntVar(&cfg.ComplexityDeltaTolerance, "complexity-delta-tolerance", 3, "In diff mode, ignore complexity regressions where head exceeds base by this much or less; brand-new functions still gated by --complexity-threshold")
 	flag.IntVar(&cfg.FunctionSizeThreshold, "function-size-threshold", 50, "Maximum lines per function")
+	flag.IntVar(&cfg.FunctionSizeDeltaTolerance, "function-size-delta-tolerance", 5, "In diff mode, ignore per-function size regressions where head grows by this many lines or fewer")
 	flag.IntVar(&cfg.FileSizeThreshold, "file-size-threshold", 500, "Maximum lines per file")
+	flag.IntVar(&cfg.FileSizeDeltaTolerancePct, "file-size-delta-tolerance-pct", 5, "In diff mode, ignore per-file size regressions where head grows by no more than this % of base lines (subject to --file-size-delta-tolerance-floor)")
+	flag.IntVar(&cfg.FileSizeDeltaToleranceFloor, "file-size-delta-tolerance-floor", 10, "Minimum absolute line growth tolerated regardless of --file-size-delta-tolerance-pct, so tiny absolute additions to small files don't fail")
 	flag.BoolVar(&cfg.SkipMutation, "skip-mutation", false, "Skip mutation testing")
 	flag.BoolVar(&cfg.SkipDeadCode, "skip-deadcode", false, "Skip dead code (unused symbol) detection")
 	flag.BoolVar(&cfg.SkipGenerated, "skip-generated", true, "Skip files marked as generated (for example `Code generated ... DO NOT EDIT`)")
@@ -70,10 +73,13 @@ func main() {
 
 // Config holds CLI configuration.
 type Config struct {
-	ComplexityThreshold      int
-	ComplexityDeltaTolerance int
-	FunctionSizeThreshold    int
-	FileSizeThreshold        int
+	ComplexityThreshold         int
+	ComplexityDeltaTolerance    int
+	FunctionSizeThreshold       int
+	FunctionSizeDeltaTolerance  int
+	FileSizeThreshold           int
+	FileSizeDeltaTolerancePct   int
+	FileSizeDeltaToleranceFloor int
 	SkipMutation          bool
 	SkipDeadCode          bool
 	SkipGenerated         bool
@@ -280,7 +286,11 @@ func runAnalyses(repoPath string, d *diff.Result, cfg Config, l lang.Language) (
 	}
 	sections = append(sections, complexitySection)
 
-	sizesSection, err := sizes.Analyze(repoPath, d, cfg.FunctionSizeThreshold, cfg.FileSizeThreshold, l.FunctionExtractor())
+	sizesSection, err := sizes.Analyze(repoPath, d, cfg.FunctionSizeThreshold, cfg.FileSizeThreshold, sizes.DeltaTolerances{
+		FuncLines:      cfg.FunctionSizeDeltaTolerance,
+		FilePct:        cfg.FileSizeDeltaTolerancePct,
+		FileFloorLines: cfg.FileSizeDeltaToleranceFloor,
+	}, l.FunctionExtractor())
 	if err != nil {
 		return nil, fmt.Errorf("size analysis: %w", err)
 	}

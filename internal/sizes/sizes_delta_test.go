@@ -72,7 +72,7 @@ func parseAndAnalyze(t *testing.T, dir, base string, funcThreshold, fileThreshol
 	if err != nil {
 		t.Fatalf("diff.Parse: %v", err)
 	}
-	section, err := Analyze(dir, d, funcThreshold, fileThreshold, goExtractor(t))
+	section, err := Analyze(dir, d, funcThreshold, fileThreshold, DeltaTolerances{}, goExtractor(t))
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -90,20 +90,28 @@ func TestGrewFunc(t *testing.T) {
 	noBase := baseSizes{}
 
 	cases := []struct {
-		name string
-		h    lang.FunctionSize
-		b    baseSizes
-		want bool
+		name      string
+		h         lang.FunctionSize
+		b         baseSizes
+		tolerance int
+		want      bool
 	}{
-		{"no_baseline_treated_as_grew", mk("f", 80), noBase, true},
-		{"absent_at_base", mk("g", 80), withBase, true},
-		{"head_higher", mk("f", 80), withBase, true},
-		{"head_equal", mk("f", 60), withBase, false},
-		{"head_lower", mk("f", 40), withBase, false},
+		{"no_baseline_treated_as_grew", mk("f", 80), noBase, 0, true},
+		{"absent_at_base", mk("g", 80), withBase, 0, true},
+		{"head_higher_no_tolerance", mk("f", 80), withBase, 0, true},
+		{"head_equal_no_tolerance", mk("f", 60), withBase, 0, false},
+		{"head_lower", mk("f", 40), withBase, 0, false},
+		// Tolerance cases: head must exceed base by *more than* tolerance.
+		// Default production setting is 5, so +1..+5 line bumps on a legacy
+		// function get forgiven; +6 is the first regression.
+		{"within_tolerance_lower_bound", mk("f", 61), withBase, 5, false},
+		{"within_tolerance_at_bound", mk("f", 65), withBase, 5, false},
+		{"just_over_tolerance", mk("f", 66), withBase, 5, true},
+		{"new_function_tolerance_irrelevant", mk("g", 80), withBase, 100, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := grewFunc(tc.h, tc.b); got != tc.want {
+			if got := grewFunc(tc.h, tc.b, tc.tolerance); got != tc.want {
 				t.Errorf("grewFunc = %v, want %v", got, tc.want)
 			}
 		})
@@ -111,24 +119,64 @@ func TestGrewFunc(t *testing.T) {
 }
 
 func TestGrewFile(t *testing.T) {
+	mk := func(path string, lines int) lang.FileSize {
+		return lang.FileSize{Path: path, Lines: lines}
+	}
 	withBase := baseSizes{file: 600, ok: true}
 	noBase := baseSizes{}
 
 	cases := []struct {
-		name string
-		h    lang.FileSize
-		b    baseSizes
-		want bool
+		name       string
+		h          lang.FileSize
+		b          baseSizes
+		pct, floor int
+		want       bool
 	}{
-		{"no_baseline_treated_as_grew", lang.FileSize{Path: "x.go", Lines: 700}, noBase, true},
-		{"head_higher", lang.FileSize{Path: "x.go", Lines: 700}, withBase, true},
-		{"head_equal", lang.FileSize{Path: "x.go", Lines: 600}, withBase, false},
-		{"head_lower", lang.FileSize{Path: "x.go", Lines: 500}, withBase, false},
+		{"no_baseline_treated_as_grew", mk("x.go", 700), noBase, 0, 0, true},
+		{"head_higher_no_tolerance", mk("x.go", 700), withBase, 0, 0, true},
+		{"head_equal", mk("x.go", 600), withBase, 0, 0, false},
+		{"head_lower", mk("x.go", 500), withBase, 0, 0, false},
+		// 5% of 600 = 30. Floor 10. max(30, 10) = 30. Growth must exceed 30.
+		{"within_pct_below_floor", mk("x.go", 605), withBase, 5, 10, false},
+		{"within_pct", mk("x.go", 625), withBase, 5, 10, false},
+		{"at_pct_boundary", mk("x.go", 630), withBase, 5, 10, false},
+		{"just_over_pct", mk("x.go", 631), withBase, 5, 10, true},
+		// Floor dominates on small files. 5% of 100 = 5; floor=10 wins.
+		// Growth ≤10 → drop; >10 → flag.
+		{"floor_dominates_drops_at_floor", mk("y.go", 110), baseSizes{file: 100, ok: true}, 5, 10, false},
+		{"floor_dominates_flags_just_over", mk("y.go", 111), baseSizes{file: 100, ok: true}, 5, 10, true},
+		// Big files: pct dominates so a fixed flat tolerance doesn't
+		// rubber-stamp huge additions.
+		{"large_file_pct_dominates", mk("z.go", 5050), baseSizes{file: 5000, ok: true}, 5, 10, false},
+		{"large_file_just_over_pct", mk("z.go", 5251), baseSizes{file: 5000, ok: true}, 5, 10, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := grewFile(tc.h, tc.b); got != tc.want {
+			if got := grewFile(tc.h, tc.b, tc.pct, tc.floor); got != tc.want {
 				t.Errorf("grewFile = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFileGrowthTolerance(t *testing.T) {
+	cases := []struct {
+		name       string
+		base       int
+		pct, floor int
+		want       int
+	}{
+		{"floor_only_when_pct_zero", 1000, 0, 50, 50},
+		{"pct_dominates_large_base", 1000, 5, 10, 50},
+		{"floor_dominates_small_base", 100, 5, 10, 10},
+		{"pct_at_exact_match_to_floor", 200, 5, 10, 10},
+		{"zero_base_collapses_to_floor", 0, 5, 10, 10},
+		{"negative_pct_treated_as_zero", 1000, -1, 25, 25},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fileGrowthTolerance(tc.base, tc.pct, tc.floor); got != tc.want {
+				t.Errorf("fileGrowthTolerance(%d, %d, %d) = %d, want %d", tc.base, tc.pct, tc.floor, got, tc.want)
 			}
 		})
 	}

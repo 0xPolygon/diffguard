@@ -142,7 +142,7 @@ func small() {
 		},
 	}
 
-	section, err := Analyze(dir, d, 50, 500, goExtractor(t))
+	section, err := Analyze(dir, d, 50, 500, DeltaTolerances{}, goExtractor(t))
 	if err != nil {
 		t.Fatalf("Analyze error: %v", err)
 	}

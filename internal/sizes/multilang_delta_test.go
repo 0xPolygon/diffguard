@@ -97,7 +97,7 @@ func analyzeMultiLangSizes(t *testing.T, dir, base, langName string) report.Sect
 	if err != nil {
 		t.Fatalf("diff.Parse: %v", err)
 	}
-	section, err := Analyze(dir, d, 50, 500, l.FunctionExtractor())
+	section, err := Analyze(dir, d, 50, 500, DeltaTolerances{}, l.FunctionExtractor())
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
