@@ -52,7 +52,11 @@ func (fc FileChange) OverlapsRange(start, end int) bool {
 // Result holds all changed source files parsed from a git diff.
 type Result struct {
 	BaseBranch string
-	Files      []FileChange
+	// MergeBase is the resolved commit SHA of merge-base(BaseBranch, HEAD).
+	// Populated by Parse; empty in refactoring mode (CollectPaths). Used by
+	// delta-gating analyzers to fetch pre-change file content via `git show`.
+	MergeBase string
+	Files     []FileChange
 }
 
 // ChangedPackages returns the unique set of package directories with changes.
@@ -136,8 +140,33 @@ func Parse(repoPath, baseBranch string, filter Filter) (*Result, error) {
 
 	return &Result{
 		BaseBranch: baseBranch,
+		MergeBase:  mergeBase,
 		Files:      files,
 	}, nil
+}
+
+// ShowAtRef returns the bytes of repoRelPath at the given git ref, or
+// (nil, nil) if the path didn't exist there. Other failures (bad ref, not a
+// git repo) bubble up as errors. Used by delta-gating analyzers to compare a
+// changed file's metric against its pre-change baseline.
+//
+// `git show ref:path` exits 128 for several distinct conditions: path absent
+// in the tree, ref unknown, not a git repo. Only the first should turn into
+// the "no baseline" signal — the others must surface as errors so a broken
+// CI config doesn't silently weaken the gate. We disambiguate on stderr.
+func ShowAtRef(repoPath, ref, repoRelPath string) ([]byte, error) {
+	cmd := exec.Command("git", "show", ref+":"+repoRelPath)
+	cmd.Dir = repoPath
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err == nil {
+		return out, nil
+	}
+	if strings.Contains(stderr.String(), "does not exist in") {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("git show %s:%s: %w (%s)", ref, repoRelPath, err, strings.TrimSpace(stderr.String()))
 }
 
 // CollectPaths builds a Result by treating each analyzable source file under

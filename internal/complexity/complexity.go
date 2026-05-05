@@ -11,9 +11,11 @@ package complexity
 import (
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
 
+	"github.com/0xPolygon/diffguard/internal/baseline"
 	"github.com/0xPolygon/diffguard/internal/diff"
 	"github.com/0xPolygon/diffguard/internal/lang"
 	"github.com/0xPolygon/diffguard/internal/report"
@@ -34,7 +36,71 @@ func Analyze(repoPath string, d *diff.Result, threshold int, calc lang.Complexit
 		}
 		results = append(results, fnResults...)
 	}
+
+	// Delta gating: in diff mode, drop pre-existing violations so PRs aren't
+	// blamed for legacy complexity they merely touched. A function over the
+	// threshold is only flagged if its complexity is greater than its value
+	// at the merge-base (or the function is brand new on this branch).
+	// Refactoring mode (CollectPaths) leaves MergeBase empty and falls
+	// through to absolute thresholds.
+	if d.MergeBase != "" {
+		results = applyDeltaFilter(repoPath, d, results, calc)
+	}
+
 	return buildSection(results, threshold), nil
+}
+
+// applyDeltaFilter drops findings whose complexity at the merge-base was
+// already >= the head value — i.e. the diff did not make the function worse.
+// New functions (absent at base) are kept as-is so they're still gated by the
+// absolute threshold downstream.
+func applyDeltaFilter(repoPath string, d *diff.Result, head []lang.FunctionComplexity, calc lang.ComplexityCalculator) []lang.FunctionComplexity {
+	baseByFile := make(map[string]map[string]int)
+	for _, fc := range d.Files {
+		if base, ok := baseComplexity(repoPath, d.MergeBase, fc.Path, calc); ok {
+			baseByFile[fc.Path] = base
+		}
+	}
+
+	var out []lang.FunctionComplexity
+	for _, h := range head {
+		if worsened(h, baseByFile[h.File]) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// worsened reports whether a head finding represents a genuine regression
+// against the base map. A nil/missing entry (function did not exist at base)
+// counts as worsened so brand-new over-threshold functions still fail.
+func worsened(h lang.FunctionComplexity, baseFuncs map[string]int) bool {
+	base, exists := baseFuncs[h.Name]
+	if !exists {
+		return true
+	}
+	return h.Complexity > base
+}
+
+// baseComplexity returns a name->complexity map for repoRelPath at ref, or
+// (nil, false) if the file did not exist at ref or could not be analyzed
+// (treated as "no baseline" — head findings stay as-is).
+func baseComplexity(repoPath, ref, repoRelPath string, calc lang.ComplexityCalculator) (map[string]int, bool) {
+	tmp, err := baseline.FetchToTemp(repoPath, ref, repoRelPath)
+	if err != nil || tmp == "" {
+		return nil, false
+	}
+	defer os.Remove(tmp)
+
+	baseFuncs, err := calc.AnalyzeFile(tmp, baseline.FullCoverage(repoRelPath))
+	if err != nil {
+		return nil, false
+	}
+	m := make(map[string]int, len(baseFuncs))
+	for _, f := range baseFuncs {
+		m[f.Name] = f.Complexity
+	}
+	return m, true
 }
 
 func collectComplexityFindings(results []lang.FunctionComplexity, threshold int) ([]report.Finding, []float64, int) {
