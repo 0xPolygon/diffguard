@@ -27,7 +27,7 @@ func TestCheckFuncSizes(t *testing.T) {
 		{FunctionInfo: lang.FunctionInfo{File: "c.go", Line: 1, Name: "huge"}, Lines: 100},
 	}
 
-	findings := checkFuncSizes(funcs, 50)
+	findings := checkFuncSizes(funcs, 50, nil)
 	if len(findings) != 2 {
 		t.Errorf("expected 2 violations, got %d", len(findings))
 	}
@@ -44,7 +44,7 @@ func TestCheckFuncSizes_AtBoundary(t *testing.T) {
 		{FunctionInfo: lang.FunctionInfo{File: "b.go", Line: 1, Name: "over"}, Lines: 51},
 	}
 
-	findings := checkFuncSizes(funcs, 50)
+	findings := checkFuncSizes(funcs, 50, nil)
 	if len(findings) != 1 {
 		t.Errorf("expected 1 violation (51 > 50), got %d", len(findings))
 	}
@@ -56,7 +56,7 @@ func TestCheckFileSizes(t *testing.T) {
 		{Path: "big.go", Lines: 600},
 	}
 
-	findings := checkFileSizes(files, 500)
+	findings := checkFileSizes(files, 500, nil)
 	if len(findings) != 1 {
 		t.Errorf("expected 1 violation, got %d", len(findings))
 	}
@@ -68,14 +68,14 @@ func TestCheckFileSizes_AtBoundary(t *testing.T) {
 		{Path: "over.go", Lines: 501},
 	}
 
-	findings := checkFileSizes(files, 500)
+	findings := checkFileSizes(files, 500, nil)
 	if len(findings) != 1 {
 		t.Errorf("expected 1 violation (501 > 500), got %d", len(findings))
 	}
 }
 
 func TestBuildSection_Empty(t *testing.T) {
-	s := buildSection(nil, nil, 50, 500)
+	s := buildSection(nil, nil, nil, nil, 50, 500, nil, nil)
 	if s.Severity != report.SeverityPass {
 		t.Errorf("empty section severity = %v, want PASS", s.Severity)
 	}
@@ -86,7 +86,7 @@ func TestBuildSection_Empty(t *testing.T) {
 
 func TestBuildSection_WithViolations(t *testing.T) {
 	funcs := []lang.FunctionSize{{FunctionInfo: lang.FunctionInfo{File: "a.go", Line: 1, Name: "big"}, Lines: 100}}
-	s := buildSection(funcs, nil, 50, 500)
+	s := buildSection(funcs, nil, funcs, nil, 50, 500, nil, nil)
 	if s.Severity != report.SeverityFail {
 		t.Errorf("section severity = %v, want FAIL", s.Severity)
 	}
@@ -98,7 +98,7 @@ func TestBuildSection_WithViolations(t *testing.T) {
 func TestBuildSection_NoViolations(t *testing.T) {
 	funcs := []lang.FunctionSize{{FunctionInfo: lang.FunctionInfo{File: "a.go", Line: 1, Name: "small"}, Lines: 10}}
 	files := []lang.FileSize{{Path: "a.go", Lines: 100}}
-	s := buildSection(funcs, files, 50, 500)
+	s := buildSection(funcs, files, funcs, files, 50, 500, nil, nil)
 	if s.Severity != report.SeverityPass {
 		t.Errorf("severity = %v, want PASS", s.Severity)
 	}
@@ -110,7 +110,7 @@ func TestBuildSection_SortedByValue(t *testing.T) {
 		{FunctionInfo: lang.FunctionInfo{File: "b.go", Line: 1, Name: "huge"}, Lines: 200},
 		{FunctionInfo: lang.FunctionInfo{File: "c.go", Line: 1, Name: "big"}, Lines: 80},
 	}
-	s := buildSection(funcs, nil, 50, 500)
+	s := buildSection(funcs, nil, funcs, nil, 50, 500, nil, nil)
 	if len(s.Findings) != 3 {
 		t.Fatalf("expected 3 findings, got %d", len(s.Findings))
 	}
@@ -142,7 +142,7 @@ func small() {
 		},
 	}
 
-	section, err := Analyze(dir, d, 50, 500, goExtractor(t))
+	section, err := Analyze(dir, d, 50, 500, DeltaTolerances{}, goExtractor(t))
 	if err != nil {
 		t.Fatalf("Analyze error: %v", err)
 	}

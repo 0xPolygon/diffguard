@@ -62,7 +62,7 @@ func complex_fn(x int) {
 		},
 	}
 
-	section, err := Analyze(dir, d, 10, goCalc(t))
+	section, err := Analyze(dir, d, 10, 0, goCalc(t))
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -80,7 +80,7 @@ func complex_fn(x int) {
 
 func TestAnalyze_EmptyResult(t *testing.T) {
 	d := &diff.Result{} // no files
-	section, err := Analyze(t.TempDir(), d, 10, goCalc(t))
+	section, err := Analyze(t.TempDir(), d, 10, 0, goCalc(t))
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestBuildSection_StatsValues(t *testing.T) {
 		{FunctionInfo: lang.FunctionInfo{File: "c.go", Line: 1, Name: "f3"}, Complexity: 12},
 	}
 
-	s := buildSection(results, 10)
+	s := buildSection(results, results, 10, nil)
 
 	stats := s.Stats.(map[string]any)
 	if stats["total_functions"] != 3 {
@@ -120,7 +120,7 @@ func TestBuildSection_StatsValues(t *testing.T) {
 }
 
 func TestBuildSection_Empty(t *testing.T) {
-	s := buildSection(nil, 10)
+	s := buildSection(nil, nil, 10, nil)
 	if s.Severity != report.SeverityPass {
 		t.Errorf("severity = %v, want PASS", s.Severity)
 	}
@@ -132,7 +132,7 @@ func TestBuildSection_WithViolations(t *testing.T) {
 		{FunctionInfo: lang.FunctionInfo{File: "b.go", Line: 1, Name: "simple"}, Complexity: 3},
 	}
 
-	s := buildSection(results, 10)
+	s := buildSection(results, results, 10, nil)
 	if s.Severity != report.SeverityFail {
 		t.Errorf("severity = %v, want FAIL", s.Severity)
 	}
@@ -148,7 +148,7 @@ func TestCollectComplexityFindings(t *testing.T) {
 		{FunctionInfo: lang.FunctionInfo{File: "c.go", Line: 1, Name: "medium"}, Complexity: 10},
 	}
 
-	findings, values, failCount := collectComplexityFindings(results, 10)
+	findings, values, failCount := collectComplexityFindings(results, 10, nil)
 
 	if failCount != 1 {
 		t.Errorf("failCount = %d, want 1", failCount)
@@ -167,7 +167,7 @@ func TestCollectComplexityFindings_AtBoundary(t *testing.T) {
 		{FunctionInfo: lang.FunctionInfo{File: "b.go", Line: 1, Name: "over"}, Complexity: 11},
 	}
 
-	_, _, failCount := collectComplexityFindings(results, 10)
+	_, _, failCount := collectComplexityFindings(results, 10, nil)
 	if failCount != 1 {
 		t.Errorf("failCount = %d, want 1 (11 > 10, 10 is not > 10)", failCount)
 	}

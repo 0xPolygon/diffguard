@@ -113,6 +113,14 @@ diffguard \
 
 **Refactoring mode (`--paths`):** Analyzes the full content of the specified files or directories, ignoring git diff entirely. Use this when iterating on an existing file's quality without a base to compare against.
 
+**Delta gating (diff mode only):** Complexity and size findings are evaluated against the merge-base, not just the absolute threshold. A finding is only reported when the metric got measurably worse on this branch — touching a 4000-line legacy file or a complexity=91 function without making it bigger or more complex no longer fails CI. Brand-new files and functions absent at base still get gated by the absolute thresholds. Tolerances absorb small bumps:
+
+  - `--complexity-delta-tolerance` (default `3`) — cognitive complexity has a nesting penalty, so threading a parameter through one extra branch can nudge the score by 1-3 with nothing materially worse happening.
+  - `--function-size-delta-tolerance` (default `5`) — absorbs defensive guards / log lines.
+  - `--file-size-delta-tolerance-pct` (default `5`) + `--file-size-delta-tolerance-floor` (default `10`) — drop rule is `growth ≤ max(floor, base × pct%)`. The percentage scales with file size so +50 lines on a 5000-line file is forgiven (1%) while the same growth on a 500-line file flags (10%); the floor stops tiny additions to small files from collapsing below the noise level.
+
+Findings on functions/files that existed at base render as `complexity=77 (+5 vs base)` / `function=80 lines (+10 vs base)` / `file=650 lines (+50 vs base)` so PR authors can distinguish "added new hot code" from "made existing hot code hotter".
+
 **Generated-file skipping (`--skip-generated`):** Enabled by default. Files marked with a standard generated-code banner such as `Code generated ... DO NOT EDIT` are excluded before they reach any analyzer. Pass `--skip-generated=false` to include them.
 
 ### Rust notes
@@ -322,8 +330,20 @@ Flags:
   --base string                   Base branch to diff against (default: auto-detect)
   --paths string                  Comma-separated files/dirs to analyze in full (refactoring mode); skips git diff
   --complexity-threshold int      Maximum cognitive complexity per function (default 10)
+  --complexity-delta-tolerance int
+                                  In diff mode, ignore complexity regressions where head exceeds base by this much
+                                  or less; brand-new functions still gated by --complexity-threshold (default 3)
   --function-size-threshold int   Maximum lines per function (default 50)
+  --function-size-delta-tolerance int
+                                  In diff mode, ignore per-function size regressions where head grows by this many
+                                  lines or fewer (default 5)
   --file-size-threshold int       Maximum lines per file (default 500)
+  --file-size-delta-tolerance-pct int
+                                  In diff mode, ignore per-file size regressions where head grows by no more than
+                                  this % of base lines (subject to --file-size-delta-tolerance-floor) (default 5)
+  --file-size-delta-tolerance-floor int
+                                  Minimum absolute line growth tolerated regardless of --file-size-delta-tolerance-pct,
+                                  so tiny absolute additions to small files don't fail (default 10)
   --skip-mutation                 Skip mutation testing
   --skip-deadcode                 Skip dead code (unused symbol) detection
   --skip-generated                Skip files marked as generated (for example `Code generated ... DO NOT EDIT`) (default true)
