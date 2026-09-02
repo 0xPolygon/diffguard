@@ -346,3 +346,35 @@ func TestHasSuffix(t *testing.T) {
 		t.Error("abc should not have suffix ac")
 	}
 }
+
+// TestScanPackageImports_HonorsBuildConstraints: a generator script under an
+// excluding build constraint lives in the package directory, is package main,
+// and imports the package itself. The Go build never compiles it, so it must
+// not contribute edges — otherwise the package appears to import itself and
+// is reported as a dependency cycle.
+func TestScanPackageImports_HonorsBuildConstraints(t *testing.T) {
+	for _, constraint := range []string{"//go:build ignore", "//go:build none"} {
+		t.Run(constraint, func(t *testing.T) {
+			dir := t.TempDir()
+			pkgDir := filepath.Join(dir, "pkg")
+			if err := os.MkdirAll(pkgDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			lib := "package pkg\n\nimport \"example.com/mod/other\"\n\nvar _ = other.X\n"
+			gen := constraint + "\n\npackage main\n\nimport \"example.com/mod/pkg\"\n\nfunc main() { _ = pkg.X }\n"
+			if err := os.WriteFile(filepath.Join(pkgDir, "a.go"), []byte(lib), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(pkgDir, "gen.go"), []byte(gen), 0644); err != nil {
+				t.Fatal(err)
+			}
+			deps := depsImpl{}.ScanPackageImports(dir, "pkg", "example.com/mod")["example.com/mod/pkg"]
+			if !deps["example.com/mod/other"] {
+				t.Errorf("expected edge to example.com/mod/other, got %+v", deps)
+			}
+			if deps["example.com/mod/pkg"] {
+				t.Errorf("generator script under %q produced a self-import edge: %+v", constraint, deps)
+			}
+		})
+	}
+}
