@@ -3,8 +3,10 @@ package goanalyzer
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,13 +37,17 @@ func (depsImpl) DetectModulePath(repoPath string) (string, error) {
 //
 //	{ <pkgImportPath>: { <internalDep1>: true, <internalDep2>: true, ... } }
 //
-// where pkgImportPath = modulePath + "/" + pkgDir. External imports and
-// `_test` packages are ignored so the graph only contains internal edges,
-// matching the pre-split deps.go behavior.
+// where pkgImportPath = modulePath + "/" + pkgDir. Only files the Go build
+// would compile for the host platform are scanned: generator scripts kept
+// next to library code under `//go:build ignore` (or `none`) are package
+// main and routinely import the very package they sit in, which the parser
+// alone would report as a self-import cycle. External imports and `_test`
+// packages are ignored so the graph only contains internal edges, matching
+// the pre-split deps.go behavior.
 func (depsImpl) ScanPackageImports(repoPath, pkgDir, modulePath string) map[string]map[string]bool {
 	absDir := filepath.Join(repoPath, pkgDir)
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, absDir, nil, parser.ImportsOnly)
+	pkgs, err := parser.ParseDir(fset, absDir, buildableFile(absDir), parser.ImportsOnly)
 	if err != nil {
 		return nil
 	}
@@ -52,6 +58,15 @@ func (depsImpl) ScanPackageImports(repoPath, pkgDir, modulePath string) map[stri
 		collectPackageEdges(p, modulePath, pkgImportPath, edges)
 	}
 	return edges
+}
+
+// buildableFile reports whether the Go build would compile the file for the
+// host platform, honoring //go:build constraints and GOOS/GOARCH suffixes.
+func buildableFile(dir string) func(fs.FileInfo) bool {
+	return func(fi fs.FileInfo) bool {
+		ok, err := build.Default.MatchFile(dir, fi.Name())
+		return err == nil && ok
+	}
 }
 
 // collectPackageEdges walks the files of a parsed package and adds internal
