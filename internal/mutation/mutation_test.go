@@ -1,8 +1,12 @@
 package mutation
 
 import (
+	"errors"
 	"runtime"
 	"testing"
+
+	"github.com/0xPolygon/diffguard/internal/diff"
+	"github.com/0xPolygon/diffguard/internal/lang"
 )
 
 // Most of what used to be tested here was the Go AST machinery:
@@ -73,3 +77,77 @@ func TestOptionsTiers(t *testing.T) {
 		t.Errorf("tier2 explicit = %v, want 50", got)
 	}
 }
+
+func TestAnalyze_PropagatesMutationCollectionErrors(t *testing.T) {
+	scanErr := errors.New("synthetic annotation scan failure")
+	generateErr := errors.New("synthetic mutant generation failure")
+
+	tests := []struct {
+		name       string
+		scannerErr error
+		generatorErr error
+		wantErr    error
+	}{
+		{
+			name:       "annotation scanner failure",
+			scannerErr: scanErr,
+			wantErr:    scanErr,
+		},
+		{
+			name:         "mutant generator failure",
+			generatorErr: generateErr,
+			wantErr:      generateErr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := &analysisErrorLanguage{
+				scanner:   stubAnnotationScanner{err: tt.scannerErr},
+				generator: stubMutantGenerator{err: tt.generatorErr},
+			}
+			d := &diff.Result{Files: []diff.FileChange{{Path: "changed.go"}}}
+
+			_, err := Analyze(t.TempDir(), d, l, Options{})
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Analyze() error = %v, want error wrapping %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+type stubAnnotationScanner struct {
+	err error
+}
+
+func (s stubAnnotationScanner) ScanAnnotations(string) (map[int]bool, error) {
+	return nil, s.err
+}
+
+type stubMutantGenerator struct {
+	err error
+}
+
+func (g stubMutantGenerator) GenerateMutants(string, diff.FileChange, map[int]bool) ([]lang.MutantSite, error) {
+	return nil, g.err
+}
+
+// analysisErrorLanguage exposes only the mutation collection dependencies.
+// Every other capability is intentionally nil because Analyze returns before
+// it can use them when collection fails.
+type analysisErrorLanguage struct {
+	scanner   lang.AnnotationScanner
+	generator lang.MutantGenerator
+}
+
+func (l *analysisErrorLanguage) Name() string { return "analysis-error-test" }
+func (l *analysisErrorLanguage) FileFilter() lang.FileFilter { return lang.FileFilter{} }
+func (l *analysisErrorLanguage) ComplexityCalculator() lang.ComplexityCalculator { return nil }
+func (l *analysisErrorLanguage) FunctionExtractor() lang.FunctionExtractor { return nil }
+func (l *analysisErrorLanguage) ImportResolver() lang.ImportResolver { return nil }
+func (l *analysisErrorLanguage) ComplexityScorer() lang.ComplexityScorer { return nil }
+func (l *analysisErrorLanguage) MutantGenerator() lang.MutantGenerator { return l.generator }
+func (l *analysisErrorLanguage) MutantApplier() lang.MutantApplier { return nil }
+func (l *analysisErrorLanguage) AnnotationScanner() lang.AnnotationScanner { return l.scanner }
+func (l *analysisErrorLanguage) TestRunner() lang.TestRunner { return nil }
+func (l *analysisErrorLanguage) DeadCodeDetector() lang.DeadCodeDetector { return nil }
