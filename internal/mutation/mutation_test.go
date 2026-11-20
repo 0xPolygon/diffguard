@@ -83,10 +83,10 @@ func TestAnalyze_PropagatesMutationCollectionErrors(t *testing.T) {
 	generateErr := errors.New("synthetic mutant generation failure")
 
 	tests := []struct {
-		name       string
-		scannerErr error
+		name         string
+		scannerErr   error
 		generatorErr error
-		wantErr    error
+		wantErr      error
 	}{
 		{
 			name:       "annotation scanner failure",
@@ -140,14 +140,14 @@ type analysisErrorLanguage struct {
 	generator lang.MutantGenerator
 }
 
-func (l *analysisErrorLanguage) Name() string { return "analysis-error-test" }
-func (l *analysisErrorLanguage) FileFilter() lang.FileFilter { return lang.FileFilter{} }
+func (l *analysisErrorLanguage) Name() string                                    { return "analysis-error-test" }
+func (l *analysisErrorLanguage) FileFilter() lang.FileFilter                     { return lang.FileFilter{} }
 func (l *analysisErrorLanguage) ComplexityCalculator() lang.ComplexityCalculator { return nil }
-func (l *analysisErrorLanguage) FunctionExtractor() lang.FunctionExtractor { return nil }
-func (l *analysisErrorLanguage) ImportResolver() lang.ImportResolver { return nil }
-func (l *analysisErrorLanguage) ComplexityScorer() lang.ComplexityScorer { return nil }
-func (l *analysisErrorLanguage) MutantGenerator() lang.MutantGenerator { return l.generator }
-func (l *analysisErrorLanguage) MutantApplier() lang.MutantApplier { return nil }
-func (l *analysisErrorLanguage) AnnotationScanner() lang.AnnotationScanner { return l.scanner }
-func (l *analysisErrorLanguage) TestRunner() lang.TestRunner { return nil }
-func (l *analysisErrorLanguage) DeadCodeDetector() lang.DeadCodeDetector { return nil }
+func (l *analysisErrorLanguage) FunctionExtractor() lang.FunctionExtractor       { return nil }
+func (l *analysisErrorLanguage) ImportResolver() lang.ImportResolver             { return nil }
+func (l *analysisErrorLanguage) ComplexityScorer() lang.ComplexityScorer         { return nil }
+func (l *analysisErrorLanguage) MutantGenerator() lang.MutantGenerator           { return l.generator }
+func (l *analysisErrorLanguage) MutantApplier() lang.MutantApplier               { return nil }
+func (l *analysisErrorLanguage) AnnotationScanner() lang.AnnotationScanner       { return l.scanner }
+func (l *analysisErrorLanguage) TestRunner() lang.TestRunner                     { return nil }
+func (l *analysisErrorLanguage) DeadCodeDetector() lang.DeadCodeDetector         { return nil }
