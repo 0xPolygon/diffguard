@@ -1,5 +1,7 @@
 package mutation
 
+import "github.com/0xPolygon/diffguard/internal/lang"
+
 // Tier classifies mutation operators by how much signal a surviving mutant
 // carries.
 //
@@ -87,6 +89,8 @@ type TierStats struct {
 	Total    int     `json:"total"`
 	Killed   int     `json:"killed"`
 	Survived int     `json:"survived"`
+	// NotRun counts mutants the budget or a cancellation never reached.
+	NotRun int `json:"not_run,omitempty"`
 	// Score is killed / total * 100; 0 when total == 0.
 	Score float64 `json:"score"`
 }
@@ -104,11 +108,15 @@ func computeTierStats(mutants []Mutant) []TierStats {
 
 	for _, m := range mutants {
 		s := stats[operatorTier(m.Operator)]
-		s.Total++
-		if m.Killed {
+		switch o := m.outcome(); {
+		case isKill(o):
+			s.Total++
 			s.Killed++
-		} else {
+		case isSurvivor(o):
+			s.Total++
 			s.Survived++
+		case o == lang.OutcomeNotRun:
+			s.NotRun++
 		}
 	}
 
@@ -121,4 +129,16 @@ func computeTierStats(mutants []Mutant) []TierStats {
 		out = append(out, *s)
 	}
 	return out
+}
+
+// gatingThreshold returns the kill-rate threshold a tier is gated on, and
+// whether it is gated at all. Tier 3 is report-only.
+func gatingThreshold(t Tier, opts Options) (float64, bool) {
+	switch t {
+	case TierLogic:
+		return opts.tier1Threshold(), true
+	case TierSemantic:
+		return opts.tier2Threshold(), true
+	}
+	return 0, false
 }

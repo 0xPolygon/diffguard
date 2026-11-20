@@ -11,6 +11,8 @@
 package lang
 
 import (
+	"context"
+	"io"
 	"time"
 
 	"github.com/0xPolygon/diffguard/internal/diff"
@@ -125,6 +127,106 @@ type MutantSite struct {
 	Line        int
 	Description string
 	Operator    string
+	// Offset is the byte offset of the mutated token, when the language can
+	// supply one. It tells apart several sites on one line; zero means the
+	// language identifies sites by line only.
+	Offset int
+}
+
+// MutantOutcome is the result of testing one mutant.
+type MutantOutcome int
+
+const (
+	// OutcomeUnset means no session reported a result (legacy runners).
+	OutcomeUnset MutantOutcome = iota
+	// OutcomeKilled: at least one test failed against the mutant.
+	OutcomeKilled
+	// OutcomeSurvived: every test that ran passed.
+	OutcomeSurvived
+	// OutcomeTimedOut: the tests exceeded their deadline. Counted as killed.
+	OutcomeTimedOut
+	// OutcomeNotCovered: no test executes the mutated code. Counted as survived.
+	OutcomeNotCovered
+	// OutcomeBuildFailed: the mutant does not compile. Excluded from scores.
+	OutcomeBuildFailed
+	// OutcomeNotApplied: the mutation could not be produced. Excluded.
+	OutcomeNotApplied
+	// OutcomeNotRun: the budget ran out or the run was cancelled. Excluded.
+	OutcomeNotRun
+	// OutcomeStoppedEarly: skipped because the tier's verdict was already
+	// statistically settled. Excluded.
+	OutcomeStoppedEarly
+)
+
+var outcomeNames = map[MutantOutcome]string{
+	OutcomeKilled:       "killed",
+	OutcomeSurvived:     "survived",
+	OutcomeTimedOut:     "timed_out",
+	OutcomeNotCovered:   "not_covered",
+	OutcomeBuildFailed:  "build_failed",
+	OutcomeNotApplied:   "not_applied",
+	OutcomeNotRun:       "not_run",
+	OutcomeStoppedEarly: "stopped_early",
+}
+
+// String returns the snake_case name used in reports and the result cache.
+func (o MutantOutcome) String() string {
+	if name, ok := outcomeNames[o]; ok {
+		return name
+	}
+	return "unset"
+}
+
+// ParseMutantOutcome is the inverse of String; unknown names yield
+// OutcomeUnset.
+func ParseMutantOutcome(name string) MutantOutcome {
+	for o, n := range outcomeNames {
+		if n == name {
+			return o
+		}
+	}
+	// mutator-disable-next-line (OutcomeUnset is the zero value: zeroing the return changes nothing)
+	return OutcomeUnset
+}
+
+// MutantResult is what a MutationSession reports for one mutant.
+type MutantResult struct {
+	Outcome MutantOutcome
+	Output  string
+}
+
+// SessionConfig carries the run-wide settings a MutationSession needs.
+type SessionConfig struct {
+	RepoPath string
+	WorkDir  string
+	// Timeout caps a single mutant's test run.
+	Timeout     time.Duration
+	TestPattern string
+	Workers     int
+	// Log receives warnings about packages that could not be tested as
+	// planned. Nil discards them.
+	Log io.Writer
+}
+
+// MutationSession tests mutants of one run. Run may be called concurrently;
+// idx indexes the sites slice the session was created with.
+type MutationSession interface {
+	Run(ctx context.Context, idx int) MutantResult
+	Close()
+}
+
+// SessionRunner is an optional Language capability: the language tests a
+// whole batch of mutants itself, so it can share builds and pick tests per
+// mutant. Languages without it are driven through MutantApplier/TestRunner.
+type SessionRunner interface {
+	NewMutationSession(ctx context.Context, cfg SessionConfig, sites []MutantSite) (MutationSession, error)
+}
+
+// Fingerprinter is an optional Language capability used by the result
+// cache: the fingerprint must change whenever anything that can alter a
+// mutant's outcome in file's package changes.
+type Fingerprinter interface {
+	MutationFingerprint(repoPath, file string) (string, error)
 }
 
 // TestRunConfig carries the parameters needed to run tests against a single

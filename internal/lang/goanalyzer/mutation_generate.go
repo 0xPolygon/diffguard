@@ -35,7 +35,11 @@ func (mutantGeneratorImpl) GenerateMutants(absPath string, fc diff.FileChange, d
 		if !fc.ContainsLine(line) || disabled[line] {
 			return true
 		}
-		mutants = append(mutants, mutantsFor(fc.Path, line, n)...)
+		offset := fset.Position(anchorPos(n)).Offset
+		for _, m := range mutantsFor(fc.Path, line, n) {
+			m.Offset = offset
+			mutants = append(mutants, m)
+		}
 		return true
 	})
 	return mutants, nil
@@ -113,15 +117,14 @@ func boolMutants(file string, line int, ident *ast.Ident) []lang.MutantSite {
 
 // returnMutants generates zero-value return mutations.
 //
-// Returns whose every result is already the literal identifier `nil` are
-// skipped: the zero-value mutation rewrites each result to `nil`, producing
-// an identical AST and therefore an equivalent mutant that can never be
-// killed.
+// Returns whose every result is already a zero literal (nil, false, 0, "", T{})
+// are skipped: the zero-value mutation would produce an equivalent mutant
+// that can never be killed.
 func returnMutants(file string, line int, ret *ast.ReturnStmt) []lang.MutantSite {
 	if len(ret.Results) == 0 {
 		return nil
 	}
-	if allLiteralNil(ret.Results) {
+	if allZeroLiterals(ret.Results) {
 		return nil
 	}
 	return []lang.MutantSite{{
@@ -132,14 +135,25 @@ func returnMutants(file string, line int, ret *ast.ReturnStmt) []lang.MutantSite
 	}}
 }
 
-func allLiteralNil(exprs []ast.Expr) bool {
+func allZeroLiterals(exprs []ast.Expr) bool {
 	for _, e := range exprs {
-		ident, ok := e.(*ast.Ident)
-		if !ok || ident.Name != "nil" {
+		if !isZeroLiteral(e) {
 			return false
 		}
 	}
 	return true
+}
+
+func isZeroLiteral(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.Ident:
+		return v.Name == "nil" || v.Name == "false"
+	case *ast.BasicLit:
+		return v.Value == "0" || v.Value == `""`
+	case *ast.CompositeLit:
+		return len(v.Elts) == 0
+	}
+	return false
 }
 
 // incdecMutants swaps ++ with -- and vice versa.

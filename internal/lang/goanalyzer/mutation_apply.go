@@ -8,6 +8,8 @@ import (
 	"go/token"
 	"strings"
 
+	"golang.org/x/tools/go/ast/astutil"
+
 	"github.com/0xPolygon/diffguard/internal/lang"
 )
 
@@ -28,68 +30,26 @@ func (mutantApplierImpl) ApplyMutation(absPath string, site lang.MutantSite) ([]
 	if err != nil {
 		return nil, nil
 	}
-
-	var applied bool
-	if site.Operator == "statement_deletion" {
-		applied = applyStatementDeletion(fset, f, site)
-	} else {
-		applied = applyMutationToAST(fset, f, site)
-	}
-	if !applied {
+	if !applyMutationToAST(fset, f, site) {
 		return nil, nil
 	}
 	return renderFile(fset, f), nil
 }
 
+// applyMutationToAST mutates the node m refers to in place and reports
+// whether it found one.
 func applyMutationToAST(fset *token.FileSet, f *ast.File, m lang.MutantSite) bool {
-	applied := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		if applied || n == nil {
-			return false
-		}
-		if fset.Position(n.Pos()).Line != m.Line {
+	applied := locateSites(fset, f, []lang.MutantSite{m}, func(c *astutil.Cursor, _ int, fn *ast.FuncType) bool {
+		switch m.Operator {
+		case "return_value":
+			return applyReturnMutation(c.Node(), fn)
+		case "statement_deletion":
+			c.Replace(&ast.EmptyStmt{Semicolon: c.Node().Pos()})
 			return true
 		}
-		applied = tryApplyMutation(n, m)
-		return !applied
+		return tryApplyMutation(c.Node(), m)
 	})
-	return applied
-}
-
-// applyStatementDeletion walks BlockStmts instead of the flat ast.Inspect
-// used for other operators because it needs the containing block to replace
-// a statement.
-func applyStatementDeletion(fset *token.FileSet, f *ast.File, m lang.MutantSite) bool {
-	applied := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		if applied {
-			return false
-		}
-		block, ok := n.(*ast.BlockStmt)
-		if !ok {
-			return true
-		}
-		if tryDeleteInBlock(fset, block, m) {
-			applied = true
-			return false
-		}
-		return true
-	})
-	return applied
-}
-
-func tryDeleteInBlock(fset *token.FileSet, block *ast.BlockStmt, m lang.MutantSite) bool {
-	for i, stmt := range block.List {
-		if fset.Position(stmt.Pos()).Line != m.Line {
-			continue
-		}
-		if _, ok := stmt.(*ast.ExprStmt); !ok {
-			continue
-		}
-		block.List[i] = &ast.EmptyStmt{Semicolon: stmt.Pos()}
-		return true
-	}
-	return false
+	return applied[0]
 }
 
 func tryApplyMutation(n ast.Node, m lang.MutantSite) bool {
@@ -98,8 +58,6 @@ func tryApplyMutation(n ast.Node, m lang.MutantSite) bool {
 		return applyBinaryMutation(n, m)
 	case "boolean_substitution":
 		return applyBoolMutation(n, m)
-	case "return_value":
-		return applyReturnMutation(n)
 	case "incdec":
 		return applyIncDecMutation(n)
 	case "branch_removal":
@@ -139,14 +97,15 @@ func applyBoolMutation(n ast.Node, m lang.MutantSite) bool {
 	return true
 }
 
-func applyReturnMutation(n ast.Node) bool {
+// applyReturnMutation replaces the returned values with the zero value of
+// each of fn's result types, so the mutant compiles whatever those types are.
+func applyReturnMutation(n ast.Node, fn *ast.FuncType) bool {
 	ret, ok := n.(*ast.ReturnStmt)
-	if !ok {
+	zeros := zeroResults(fn)
+	if !ok || len(zeros) == 0 {
 		return false
 	}
-	for i := range ret.Results {
-		ret.Results[i] = zeroValueExpr(ret.Results[i])
-	}
+	ret.Results = zeros
 	return true
 }
 
@@ -195,10 +154,6 @@ func parseMutationOp(desc string) (from, to token.Token) {
 		return token.ILLEGAL, token.ILLEGAL
 	}
 	return fromOp, toOp
-}
-
-func zeroValueExpr(expr ast.Expr) ast.Expr {
-	return &ast.Ident{Name: "nil", NamePos: expr.Pos()}
 }
 
 func renderFile(fset *token.FileSet, f *ast.File) []byte {

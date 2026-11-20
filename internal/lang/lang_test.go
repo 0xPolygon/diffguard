@@ -64,3 +64,22 @@ func TestFileFilter_NilIsTestFile(t *testing.T) {
 		t.Error("with nil IsTestFile, everything with matching ext should be included")
 	}
 }
+
+func TestMutantOutcomeNamesRoundTrip(t *testing.T) {
+	all := []MutantOutcome{OutcomeKilled, OutcomeSurvived, OutcomeTimedOut, OutcomeNotCovered,
+		OutcomeBuildFailed, OutcomeNotApplied, OutcomeNotRun, OutcomeStoppedEarly}
+	seen := map[string]bool{}
+	for _, o := range all {
+		name := o.String()
+		if name == "unset" || seen[name] {
+			t.Errorf("outcome %d has no distinct name (%q)", o, name)
+		}
+		seen[name] = true
+		if ParseMutantOutcome(name) != o {
+			t.Errorf("ParseMutantOutcome(%q) != %d", name, o)
+		}
+	}
+	if OutcomeUnset.String() != "unset" || ParseMutantOutcome("nonsense") != OutcomeUnset || ParseMutantOutcome("") != OutcomeUnset {
+		t.Error("unknown names map to OutcomeUnset")
+	}
+}

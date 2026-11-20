@@ -2,6 +2,7 @@ package goanalyzer
 
 import (
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -309,5 +310,38 @@ func f(x int) bool {
 	}
 	if !foundAt8 {
 		t.Error("expected mutants on un-annotated line 8")
+	}
+}
+
+func TestIsZeroLiteral(t *testing.T) {
+	cases := map[string]bool{
+		"nil": true, "false": true, "0": true, `""`: true, "T{}": true, "[]int{}": true,
+		"true": false, "1": false, `"x"`: false, "x": false, "T{A: 1}": false, "f()": false,
+	}
+	for src, want := range cases {
+		expr, err := parser.ParseExpr(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isZeroLiteral(expr); got != want {
+			t.Errorf("isZeroLiteral(%s) = %v, want %v", src, got, want)
+		}
+	}
+}
+
+// A return that is already all zero values has no observable zero-value
+// mutant; one with any non-zero result does.
+func TestReturnMutants_SkipsZeroValueReturns(t *testing.T) {
+	for src, want := range map[string]int{
+		"return nil, false": 0, "return 0, T{}": 0, "return nil, err": 1, "return 1": 1,
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), "", "package p\nfunc f() {"+src+"}", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret := f.Decls[0].(*ast.FuncDecl).Body.List[0].(*ast.ReturnStmt)
+		if got := len(returnMutants("f.go", 1, ret)); got != want {
+			t.Errorf("%q: %d mutants, want %d", src, got, want)
+		}
 	}
 }
