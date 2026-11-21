@@ -171,7 +171,11 @@ func (o Options) runContext() (context.Context, context.CancelFunc) {
 // MutantGenerator) and tests each mutant, through the language's
 // SessionRunner when it has one and its MutantApplier/TestRunner otherwise.
 func Analyze(repoPath string, d *diff.Result, l lang.Language, opts Options) (report.Section, error) {
-	mutants := planMutants(collectMutants(repoPath, d, l), opts)
+	allMutants, err := collectMutants(repoPath, d, l)
+	if err != nil {
+		return report.Section{}, err
+	}
+	mutants := planMutants(allMutants, opts)
 
 	if len(mutants) == 0 {
 		return report.Section{
@@ -199,7 +203,7 @@ func Analyze(repoPath string, d *diff.Result, l lang.Language, opts Options) (re
 // collectMutants gathers mutation sites for every changed file, honoring
 // the language's annotation scanner so lines marked
 // `// mutator-disable-*` never produce mutants.
-func collectMutants(repoPath string, d *diff.Result, l lang.Language) []Mutant {
+func collectMutants(repoPath string, d *diff.Result, l lang.Language) ([]Mutant, error) {
 	gen := l.MutantGenerator()
 	scanner := l.AnnotationScanner()
 
@@ -208,11 +212,11 @@ func collectMutants(repoPath string, d *diff.Result, l lang.Language) []Mutant {
 		absPath := filepath.Join(repoPath, fc.Path)
 		disabled, err := scanner.ScanAnnotations(absPath)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("scanning mutation annotations for %s: %w", fc.Path, err)
 		}
 		sites, err := gen.GenerateMutants(absPath, fc, disabled)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("generating mutants for %s: %w", fc.Path, err)
 		}
 		for _, s := range sites {
 			all = append(all, Mutant{
@@ -224,5 +228,5 @@ func collectMutants(repoPath string, d *diff.Result, l lang.Language) []Mutant {
 			})
 		}
 	}
-	return all
+	return all, nil
 }
