@@ -599,3 +599,20 @@ func findSectionBySuffix(r report.Report, metricPrefix, langName string) *report
 	}
 	return nil
 }
+
+func TestParseShard(t *testing.T) {
+	if i, n, err := parseShard(""); i != 0 || n != 0 || err != nil {
+		t.Errorf("empty spec: got %d/%d, %v", i, n, err)
+	}
+	if i, n, err := parseShard("2/4"); i != 2 || n != 4 || err != nil {
+		t.Errorf("2/4: got %d/%d, %v", i, n, err)
+	}
+	if i, n, err := parseShard("4/4"); i != 4 || n != 4 || err != nil {
+		t.Errorf("4/4: got %d/%d, %v", i, n, err)
+	}
+	for _, bad := range []string{"0/4", "5/4", "x", "2", "2/"} {
+		if _, _, err := parseShard(bad); err == nil {
+			t.Errorf("parseShard(%q): want an error", bad)
+		}
+	}
+}

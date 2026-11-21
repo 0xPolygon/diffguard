@@ -48,10 +48,17 @@ func (testRunnerImpl) RunTest(cfg lang.TestRunConfig) (bool, string, error) {
 // writeOverlayJSON writes a go build overlay file mapping originalPath to
 // mutantPath. See `go help build` -overlay flag for format details.
 func writeOverlayJSON(path, originalPath, mutantPath string) error {
+	return writeOverlayMap(path, map[string]string{originalPath: mutantPath})
+}
+
+// writeOverlayMap writes a go build overlay file with the given
+// original-path to replacement-path entries. An entry whose original path
+// does not exist adds a file to that directory's package.
+func writeOverlayMap(path string, replace map[string]string) error {
 	overlay := struct {
 		Replace map[string]string `json:"Replace"`
 	}{
-		Replace: map[string]string{originalPath: mutantPath},
+		Replace: replace,
 	}
 	data, err := json.Marshal(overlay)
 	if err != nil {
@@ -67,7 +74,7 @@ func buildTestArgs(cfg lang.TestRunConfig, overlayPath string) []string {
 	if timeout <= 0 {
 		timeout = defaultGoTestTimeout
 	}
-	args := []string{"test", "-overlay=" + overlayPath, "-count=1", "-timeout", timeout.String()}
+	args := []string{"test", "-overlay=" + overlayPath, "-count=1", "-failfast", "-timeout", timeout.String()}
 	if cfg.TestPattern != "" {
 		args = append(args, "-run", cfg.TestPattern)
 	}

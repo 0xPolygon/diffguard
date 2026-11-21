@@ -187,7 +187,7 @@ func TestBuildSection_TierSummaryIncluded(t *testing.T) {
 		{Operator: "negate_conditional", Killed: true},
 		{Operator: "boolean_substitution", Killed: false, Description: "true -> false"},
 	}
-	s := buildSection(mutants, 1, Options{})
+	s := buildSection(mutants, Options{})
 
 	// Summary should include both the overall score and per-tier breakdowns.
 	for _, want := range []string{"Score:", "T1 logic:", "T2 semantic:"} {

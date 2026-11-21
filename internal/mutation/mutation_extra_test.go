@@ -17,7 +17,7 @@ func TestBuildSection_HighScore(t *testing.T) {
 		{File: "a.go", Line: 4, Killed: true, Operator: "negate_conditional"},
 		{File: "a.go", Line: 5, Killed: true, Operator: "negate_conditional"},
 	}
-	s := buildSection(mutants, 5, Options{})
+	s := buildSection(mutants, Options{})
 	if s.Severity != report.SeverityPass {
 		t.Errorf("severity = %v, want PASS", s.Severity)
 	}
@@ -33,7 +33,7 @@ func TestBuildSection_LowScore(t *testing.T) {
 		{File: "a.go", Line: 4, Killed: false, Description: "mut", Operator: "negate_conditional"},
 		{File: "a.go", Line: 5, Killed: false, Description: "mut", Operator: "negate_conditional"},
 	}
-	s := buildSection(mutants, 1, Options{})
+	s := buildSection(mutants, Options{})
 	if s.Severity != report.SeverityFail {
 		t.Errorf("severity = %v, want FAIL", s.Severity)
 	}
@@ -52,14 +52,14 @@ func TestBuildSection_MediumScore(t *testing.T) {
 	for i := killed; i < 10; i++ {
 		mutants[i] = Mutant{File: "a.go", Line: i, Killed: false, Description: "mut", Operator: "boolean_substitution"}
 	}
-	s := buildSection(mutants, killed, Options{})
+	s := buildSection(mutants, Options{})
 	if s.Severity != report.SeverityWarn {
 		t.Errorf("severity = %v, want WARN", s.Severity)
 	}
 }
 
 func TestBuildSection_ZeroMutants(t *testing.T) {
-	s := buildSection(nil, 0, Options{})
+	s := buildSection(nil, Options{})
 	if s.Severity != report.SeverityPass {
 		t.Errorf("severity = %v, want PASS", s.Severity)
 	}

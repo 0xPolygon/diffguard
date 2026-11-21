@@ -247,11 +247,35 @@ Per-language operators on top of the canonical set:
 
 Reports a mutation score (killed / total). Mutants run fully in parallel — including mutants on the same file — using language-native isolation strategies:
 
-- **Go**: `go test -overlay` so each worker sees its own mutated copy without touching the real source tree.
+- **Go**: every mutant of a package is compiled into one test binary behind a runtime switch, so the package is built once rather than once per mutant. A traced run of each test records which mutants it reaches, and a mutant is then tested by running only those tests, fastest first. Tests in packages beneath the mutated one count too. A mutant that cannot share the build (for example one in a constant expression) falls back to its own `go test -overlay` run.
 - **Rust**: per-mutant temp-copy of the crate directory (isolated `target/`).
 - **TypeScript**: per-mutant in-place text edit with restore-on-defer, serialized by file.
 
 Concurrency defaults to `runtime.NumCPU()` and is tunable with `--mutation-workers`. Use `--skip-mutation` to skip entirely, or `--mutation-sample-rate 20` for a faster-but-noisier subset.
+
+#### What counts toward the score
+
+Only mutants that compiled and were tested are scored. The summary lists everything else separately:
+
+| Outcome | Scored as | Meaning |
+|---|---|---|
+| killed | killed | a test failed |
+| timed out | killed | the tests ran far longer than they do unmutated |
+| survived | survived | every test that reaches the mutant passed |
+| not covered | survived | no test executes the mutated code (Go) |
+| does not compile | excluded | the mutation is not a valid program, so it says nothing about the tests |
+| not run | excluded | the budget ran out or the run was cancelled; a gating tier with any of these is at least WARN |
+
+If a package's tests fail before any mutation is applied, its mutants are reported as not run instead of all "killed".
+
+#### Keeping large diffs fast
+
+- Mutants are tested Tier 1 first, then Tier 2, then Tier 3, so a time limit costs the least important results.
+- `--mutation-budget 15m` caps the wall-clock time. On SIGINT/SIGTERM (a cancelled CI job) the run stops and the report covers what finished.
+- `--mutation-cache-dir <dir>` reuses outcomes for packages whose sources, tests, in-repo dependencies, `go.mod`/`go.sum` and toolchain are unchanged since a cached run (Go). Persist the directory between CI runs to make re-pushes cheap.
+- `--mutation-shard i/n` tests one of `n` slices of the mutants, to split a run across parallel jobs.
+- `--mutation-confidence 0.99` stops a gating tier once its pass/fail verdict is statistically settled at that confidence.
+- Sampling is seeded (`--mutation-seed`, default 1), so the same commit selects the same mutants.
 
 #### Tiered mutation scoring
 
@@ -348,10 +372,16 @@ Flags:
   --skip-deadcode                 Skip dead code (unused symbol) detection
   --skip-generated                Skip files marked as generated (for example `Code generated ... DO NOT EDIT`) (default true)
   --mutation-sample-rate float    Percentage of mutants to test, 0-100 (default 100)
-  --test-timeout duration         Per-mutant test timeout (default 30s)
+  --test-timeout duration         Ceiling on a mutant's test run (default 30s). For Go the limit is derived from
+                                  how long the same tests take unmutated, and this caps it
   --test-pattern string           Pattern passed to the per-language test runner (scopes tests to speed up slow suites;
                                   Go: `go test -run`, Rust: `cargo test --`, TS: forwarded as npm_config_test_pattern)
   --mutation-workers int          Max packages processed concurrently during mutation testing; 0 = runtime.NumCPU() (default 0)
+  --mutation-budget duration      Wall-clock cap on mutation testing; mutants not reached are reported as not run (default 0 = none)
+  --mutation-seed int             Seed for mutant sampling and early-stop ordering (default 1)
+  --mutation-shard string         Test only shard i of n of the mutants, as i/n (e.g. 2/4)
+  --mutation-cache-dir string     Directory for cached mutant outcomes; unchanged packages are not re-tested
+  --mutation-confidence float     Stop a gating tier early once its verdict holds at this confidence (default 0 = off)
   --tier1-threshold float         Minimum kill % for Tier-1 (logic) mutations; below triggers FAIL (default 90)
   --tier2-threshold float         Minimum kill % for Tier-2 (semantic) mutations; below triggers WARN (default 70)
   --output string                 Output format: text, json (default "text")

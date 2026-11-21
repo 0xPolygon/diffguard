@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/0xPolygon/diffguard/internal/churn"
@@ -40,6 +43,11 @@ func main() {
 	flag.DurationVar(&cfg.TestTimeout, "test-timeout", 30*time.Second, "Per-mutant test binary timeout (e.g. 60s, 2m)")
 	flag.StringVar(&cfg.TestPattern, "test-pattern", "", "Test name pattern passed to `go test -run` for each mutant (speeds up mutation testing on packages with slow suites)")
 	flag.IntVar(&cfg.MutationWorkers, "mutation-workers", 0, "Max packages processed concurrently during mutation testing; 0 = runtime.NumCPU()")
+	flag.DurationVar(&cfg.MutationBudget, "mutation-budget", 0, "Wall-clock cap on mutation testing (e.g. 15m); mutants not reached are reported as not run. 0 = no cap")
+	flag.Int64Var(&cfg.MutationSeed, "mutation-seed", 1, "Seed for mutant sampling and early-stop ordering; the same seed selects the same mutants")
+	flag.StringVar(&cfg.MutationShard, "mutation-shard", "", "Test only shard i of n of the mutants, as i/n (e.g. 2/4), to split a run across jobs")
+	flag.StringVar(&cfg.MutationCacheDir, "mutation-cache-dir", "", "Directory for cached mutant outcomes; packages unchanged since a cached run are not re-tested")
+	flag.Float64Var(&cfg.MutationConfidence, "mutation-confidence", 0, "Stop a gating tier early once its pass/fail verdict holds at this confidence (e.g. 0.99); 0 = test every mutant")
 	flag.Float64Var(&cfg.Tier1Threshold, "tier1-threshold", 90, "Minimum kill % for Tier-1 (logic) mutations; below triggers FAIL")
 	flag.Float64Var(&cfg.Tier2Threshold, "tier2-threshold", 70, "Minimum kill % for Tier-2 (semantic) mutations; below triggers WARN. Tier-3 (observability) is report-only.")
 	flag.StringVar(&cfg.Output, "output", "text", "Output format: text, json")
@@ -65,6 +73,19 @@ func main() {
 		cfg.BaseBranch = detectBaseBranch(repoPath)
 	}
 
+	shardIndex, shardCount, err := parseShard(cfg.MutationShard)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.shardIndex, cfg.shardCount = shardIndex, shardCount
+
+	// On SIGINT/SIGTERM (a cancelled CI job) mutation testing stops and the
+	// report covers what finished, instead of the run dying with nothing.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	cfg.ctx = ctx
+
 	if err := run(repoPath, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -87,6 +108,11 @@ type Config struct {
 	TestTimeout           time.Duration
 	TestPattern           string
 	MutationWorkers       int
+	MutationBudget        time.Duration
+	MutationSeed          int64
+	MutationShard         string
+	MutationCacheDir      string
+	MutationConfidence    float64
 	Tier1Threshold        float64
 	Tier2Threshold        float64
 	Output                string
@@ -94,6 +120,22 @@ type Config struct {
 	BaseBranch            string
 	Paths                 string
 	Language              string
+
+	ctx        context.Context
+	shardIndex int
+	shardCount int
+}
+
+// parseShard parses an "i/n" shard spec into its 1-based index and count.
+// An empty spec means no sharding.
+func parseShard(spec string) (index, count int, err error) {
+	if spec == "" {
+		return 0, 0, nil
+	}
+	if _, err := fmt.Sscanf(spec, "%d/%d", &index, &count); err != nil || index < 1 || index > count {
+		return 0, 0, fmt.Errorf("invalid --mutation-shard %q: want i/n with 1 <= i <= n", spec)
+	}
+	return index, count, nil
 }
 
 // langResult bundles the per-language analysis output so the orchestrator
@@ -324,6 +366,14 @@ func runAnalyses(repoPath string, d *diff.Result, cfg Config, l lang.Language) (
 			Workers:        cfg.MutationWorkers,
 			Tier1Threshold: cfg.Tier1Threshold,
 			Tier2Threshold: cfg.Tier2Threshold,
+			Context:        cfg.ctx,
+			Budget:         cfg.MutationBudget,
+			Seed:           cfg.MutationSeed,
+			ShardIndex:     cfg.shardIndex,
+			ShardCount:     cfg.shardCount,
+			CacheDir:       cfg.MutationCacheDir,
+			Confidence:     cfg.MutationConfidence,
+			Progress:       os.Stderr,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("mutation analysis: %w", err)
