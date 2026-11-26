@@ -355,6 +355,33 @@ func TestBuildSection_IncompleteGatingTierWarns(t *testing.T) {
 	}
 }
 
+// Mutants whose tests fail without any mutation were never judged. A gating
+// tier holding any of them fails, and says which file they are in.
+func TestBuildSection_BaselineFailedFailsTheGate(t *testing.T) {
+	section := func(operator string) report.Section {
+		mutants := numbered(3, operator)
+		mutants[0].setResult(lang.MutantResult{Outcome: lang.OutcomeKilled})
+		mutants[1].setResult(lang.MutantResult{Outcome: lang.OutcomeBaselineFailed})
+		mutants[2].setResult(lang.MutantResult{Outcome: lang.OutcomeBaselineFailed})
+		return buildSection(mutants, Options{})
+	}
+	for _, operator := range []string{"negate_conditional", "boolean_substitution"} {
+		s := section(operator)
+		if s.Severity != report.SeverityFail || !strings.Contains(s.Summary, "2 NOT TESTED") {
+			t.Errorf("%s: %v %q", operator, s.Severity, s.Summary)
+		}
+		if len(s.Findings) != 1 || !strings.Contains(s.Findings[0].Message, "NOT TESTED: 2 mutant(s)") || s.Findings[0].File != "a.go" {
+			t.Errorf("%s: findings = %+v", operator, s.Findings)
+		}
+		if total := s.Stats.(map[string]any)["total"]; total != 1 {
+			t.Errorf("%s: untested mutants must stay out of the score, total = %v", operator, total)
+		}
+	}
+	if s := section("statement_deletion"); s.Severity != report.SeverityPass {
+		t.Errorf("tier 3 is report-only: severity = %v, want PASS", s.Severity)
+	}
+}
+
 func TestTierSeverity_FailBeatsIncomplete(t *testing.T) {
 	ts := TierStats{Tier: TierLogic, Total: 10, Killed: 1, Score: 10, NotRun: 5}
 	if got := tierSeverity(ts, Options{}); got != report.SeverityFail {

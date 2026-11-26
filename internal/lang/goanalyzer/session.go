@@ -26,6 +26,9 @@ const slowTestThreshold = time.Second
 // A mutant that cannot be compiled into the shared binary, or a package
 // whose shared build or baseline fails, is tested the slow way: one
 // `go test -overlay` per mutant.
+//
+// Tests that fail without any mutation cannot judge a mutant. They are left
+// out, and a mutant only they reach is reported as baseline-failed.
 type goSession struct {
 	cfg    lang.SessionConfig
 	sites  []lang.MutantSite
@@ -124,8 +127,9 @@ type mutantPackage struct {
 
 // runSchemata tests mutant id against every test that reaches it.
 func (p *mutantPackage) runSchemata(ctx context.Context, id int) lang.MutantResult {
-	covered := false
+	covered, broken := false, false
 	for _, b := range p.bins {
+		broken = broken || b.broken[id]
 		for _, g := range b.groupsReaching(id) {
 			covered = true
 			if res := b.runGroup(ctx, g, id, p.session.cfg); res.Outcome != lang.OutcomeSurvived {
@@ -133,18 +137,24 @@ func (p *mutantPackage) runSchemata(ctx context.Context, id int) lang.MutantResu
 			}
 		}
 	}
-	if !covered {
-		return lang.MutantResult{Outcome: lang.OutcomeNotCovered}
+	switch {
+	case covered:
+		return lang.MutantResult{Outcome: lang.OutcomeSurvived}
+	case broken:
+		return lang.MutantResult{Outcome: lang.OutcomeBaselineFailed}
 	}
-	return lang.MutantResult{Outcome: lang.OutcomeSurvived}
+	return lang.MutantResult{Outcome: lang.OutcomeNotCovered}
 }
 
 // runOverlay tests one mutant with its own build: the mutated file replaces
 // the original through a build overlay.
 func (p *mutantPackage) runOverlay(ctx context.Context, idx int) lang.MutantResult {
 	p.baselineOnce.Do(func() { p.overlayBaseline(ctx) })
-	if !p.baselineOK {
+	switch {
+	case ctx.Err() != nil:
 		return lang.MutantResult{Outcome: lang.OutcomeNotRun}
+	case !p.baselineOK:
+		return lang.MutantResult{Outcome: lang.OutcomeBaselineFailed}
 	}
 	cfg := p.session.cfg
 	site := p.session.sites[idx]
@@ -171,7 +181,8 @@ func (p *mutantPackage) runOverlay(ctx context.Context, idx int) lang.MutantResu
 }
 
 // overlayBaseline runs the package's unmutated tests once. If they fail,
-// every result would read as a kill, so the package's mutants are not run.
+// every result would read as a kill, so the package's mutants are reported
+// as baseline-failed instead of being run.
 func (p *mutantPackage) overlayBaseline(ctx context.Context) {
 	args := []string{"test", "-count=1"}
 	if pattern := p.session.cfg.TestPattern; pattern != "" {
@@ -181,7 +192,7 @@ func (p *mutantPackage) overlayBaseline(ctx context.Context) {
 	p.baselineOK = res.err == nil
 	p.baselineTook = res.duration
 	if !p.baselineOK && ctx.Err() == nil {
-		p.session.logf("tests fail without any mutation in %s; its mutants were not run\n%s", p.dir, res.output)
+		p.session.logf("tests fail without any mutation in %s; its mutants cannot be tested\n%s", p.dir, res.output)
 	}
 }
 
@@ -233,6 +244,9 @@ type testBinary struct {
 	// own; otherwise whole holds a single traced run of the full suite.
 	tests []tracedTest
 	whole *tracedTest
+	// broken holds the mutants reached by tests that fail without any
+	// mutation and are therefore left out of tests.
+	broken map[int]bool
 }
 
 // tracedTest is an unmutated test run and the mutants it reached.

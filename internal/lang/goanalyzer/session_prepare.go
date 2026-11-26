@@ -282,18 +282,41 @@ func dependsOn(deps, importPath string) bool {
 
 // baseline runs the binary's tests unmutated, recording which mutants each
 // reaches. It prefers one run per test, which lets a mutant be tested by
-// only the tests that reach it; if a test fails on its own (tests that
-// depend on each other), it falls back to a single run of the whole suite.
-// It reports false if the suite does not pass even then.
+// only the tests that reach it. If some tests fail on their own, a single
+// run of the whole suite is tried (tests that depend on each other); if
+// that fails too, the failing tests are left out and the rest are used.
+// It reports false if no test passes.
 func (b *testBinary) baseline(ctx context.Context, s *goSession) bool {
-	names, ok := b.listTests(ctx, s.cfg)
-	if ok {
-		if tests, ok := b.traceEach(ctx, s, names); ok {
-			b.tests = tests
-			return true
-		}
+	names, _ := b.listTests(ctx, s.cfg)
+	passing, failing := b.traceEach(ctx, s, names)
+	if len(failing) == 0 && len(passing) > 0 {
+		b.tests = passing
+		return true
 	}
-	for range 2 {
+	if b.traceWhole(ctx, s, len(passing) == 0) {
+		return true
+	}
+	if len(passing) == 0 || ctx.Err() != nil {
+		return false
+	}
+	b.tests, b.broken = passing, map[int]bool{}
+	var left []string
+	for _, t := range failing {
+		left = append(left, t.name)
+		maps.Copy(b.broken, t.reach)
+	}
+	s.logf("%s: %d test(s) fail without any mutation and were left out: %s", b.dir, len(left), strings.Join(left, ", "))
+	return true
+}
+
+// traceWhole traces the whole suite in one run, once more if retry is set
+// and the first run fails. It reports whether a run passed.
+func (b *testBinary) traceWhole(ctx context.Context, s *goSession, retry bool) bool {
+	tries := 1
+	if retry {
+		tries = 2
+	}
+	for range tries {
 		release := s.acquire()
 		whole, ok := b.trace(ctx, s.cfg, "")
 		release()
@@ -327,35 +350,36 @@ func (b *testBinary) listTests(ctx context.Context, cfg lang.SessionConfig) ([]s
 	return names, true
 }
 
-// traceEach traces every test in its own process. It reports false, and
-// stops starting further traces, as soon as one of them fails.
-func (b *testBinary) traceEach(ctx context.Context, s *goSession, names []string) ([]tracedTest, bool) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+// traceEach traces every test in its own process, a second time if it
+// fails, and returns the tests that passed and those that did not.
+func (b *testBinary) traceEach(ctx context.Context, s *goSession, names []string) (passing, failing []tracedTest) {
 	tests := make([]tracedTest, len(names))
 	passed := make([]bool, len(names))
 	var wg sync.WaitGroup
 	for i, name := range names {
 		release := s.acquire()
-		if ctx.Err() != nil {
-			release()
-			break
-		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer release()
 			if tests[i], passed[i] = b.trace(ctx, s.cfg, name); !passed[i] {
-				cancel()
+				tests[i], passed[i] = b.trace(ctx, s.cfg, name)
 			}
 		}()
 	}
 	wg.Wait()
-	return tests, !slices.Contains(passed, false)
+	for i, t := range tests {
+		if passed[i] {
+			passing = append(passing, t)
+		} else {
+			failing = append(failing, t)
+		}
+	}
+	return passing, failing
 }
 
 // trace runs one test (or, with an empty name, the whole suite) unmutated
-// and returns what it reached.
+// and returns what it reached, which is recorded even if the run fails.
 func (b *testBinary) trace(ctx context.Context, cfg lang.SessionConfig, name string) (tracedTest, bool) {
 	traceFile := b.path + "." + name + ".trace"
 	os.Remove(traceFile)
@@ -370,10 +394,7 @@ func (b *testBinary) trace(ctx context.Context, cfg lang.SessionConfig, name str
 		name:    b.path,
 		args:    append([]string{"-test.count=1"}, runFilter(names, cfg.TestPattern)...),
 	}.run(ctx)
-	if res.err != nil {
-		return tracedTest{}, false
-	}
-	return tracedTest{name: name, duration: res.duration, reach: readTrace(traceFile)}, true
+	return tracedTest{name: name, duration: res.duration, reach: readTrace(traceFile)}, res.err == nil
 }
 
 // readTrace returns the mutant ids recorded in a trace file. A missing file

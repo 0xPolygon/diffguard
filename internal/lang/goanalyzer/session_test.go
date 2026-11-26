@@ -272,19 +272,70 @@ func TestB(t *testing.T) {
 }
 
 // If the tests fail before any mutation, every mutant would look killed.
-// They must be reported as not run instead.
+// They must be reported as baseline-failed instead.
 func TestSession_FailingBaselineRunsNothing(t *testing.T) {
 	root := writeModule(t, "package p\n\nfunc Add(a, b int) int { return a + b }\n",
 		"package p\n\nimport \"testing\"\n\nfunc TestRed(t *testing.T) { t.Fatal(Add(1, 1)) }\n")
 	var log bytes.Buffer
 	got, _ := runSession(t, root, lang.SessionConfig{Log: &log})
 	for k, o := range got {
-		if o != lang.OutcomeNotRun {
-			t.Errorf("%s: got %v, want not_run", k, o)
+		if o != lang.OutcomeBaselineFailed {
+			t.Errorf("%s: got %v, want baseline_failed", k, o)
 		}
 	}
 	if !strings.Contains(log.String(), "tests fail without any mutation") {
 		t.Errorf("the failing baseline must be reported, log:\n%s", log.String())
+	}
+}
+
+// One test that fails without any mutation must not cost the package its
+// other tests: it is left out and named, the mutants the passing tests reach
+// are tested, and a mutant only the failing test reaches is baseline-failed.
+func TestSession_FailingTestIsLeftOut(t *testing.T) {
+	source := `package p
+
+func Add(a, b int) int { return a + b }
+
+func Twice(a int) int { return a * 2 }
+
+func Unused(a int) int { return a - 1 }
+`
+	tests := `package p
+
+import "testing"
+
+func TestAdd(t *testing.T) {
+	if Add(2, 3) != 5 {
+		t.Fatal("Add")
+	}
+}
+
+func TestRed(t *testing.T) {
+	if Add(2, 3) != 5 || Twice(2) != 4 {
+		t.Fatal("unreachable")
+	}
+	t.Fatal("always red")
+}
+`
+	root := writeModule(t, source, tests)
+	var log bytes.Buffer
+	got, session := runSession(t, root, lang.SessionConfig{Log: &log})
+	want := map[string]lang.MutantOutcome{
+		"func Add(a, b int) int { return a + b } | math_operator": lang.OutcomeKilled,
+		"func Twice(a int) int { return a * 2 } | math_operator":  lang.OutcomeBaselineFailed,
+		"func Unused(a int) int { return a - 1 } | math_operator": lang.OutcomeNotCovered,
+	}
+	for k, o := range want {
+		if got[k] != o {
+			t.Errorf("%s: got %v, want %v", k, got[k], o)
+		}
+	}
+	b := session.pkgs[0].bins[0]
+	if len(b.tests) != 1 || b.tests[0].name != "TestAdd" || b.whole != nil {
+		t.Errorf("want only TestAdd kept, got %+v", b)
+	}
+	if !strings.Contains(log.String(), "1 test(s) fail without any mutation and were left out: TestRed") {
+		t.Errorf("the left-out test must be named, log:\n%s", log.String())
 	}
 }
 
@@ -572,8 +623,8 @@ func TestSession_TestsThatDoNotCompileRunNothing(t *testing.T) {
 	var log bytes.Buffer
 	got, _ := runSession(t, root, lang.SessionConfig{Log: &log})
 	for k, o := range got {
-		if o != lang.OutcomeNotRun {
-			t.Errorf("%s: got %v, want not_run", k, o)
+		if o != lang.OutcomeBaselineFailed {
+			t.Errorf("%s: got %v, want baseline_failed", k, o)
 		}
 	}
 	if !strings.Contains(log.String(), "its instrumented tests do not build; testing its 2 mutants one build at a time") {

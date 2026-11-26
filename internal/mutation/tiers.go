@@ -91,6 +91,8 @@ type TierStats struct {
 	Survived int     `json:"survived"`
 	// NotRun counts mutants the budget or a cancellation never reached.
 	NotRun int `json:"not_run,omitempty"`
+	// BaselineFailed counts mutants whose tests fail without any mutation.
+	BaselineFailed int `json:"baseline_failed,omitempty"`
 	// Score is killed / total * 100; 0 when total == 0.
 	Score float64 `json:"score"`
 }
@@ -117,6 +119,8 @@ func computeTierStats(mutants []Mutant) []TierStats {
 			s.Survived++
 		case o == lang.OutcomeNotRun:
 			s.NotRun++
+		case o == lang.OutcomeBaselineFailed:
+			s.BaselineFailed++
 		}
 	}
 

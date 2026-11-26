@@ -131,7 +131,7 @@ func TestCacheable(t *testing.T) {
 	for o, want := range map[lang.MutantOutcome]bool{
 		lang.OutcomeKilled: true, lang.OutcomeSurvived: true, lang.OutcomeNotCovered: true,
 		lang.OutcomeBuildFailed: true, lang.OutcomeNotApplied: true,
-		lang.OutcomeTimedOut: false, lang.OutcomeNotRun: false, lang.OutcomeStoppedEarly: false, lang.OutcomeUnset: false,
+		lang.OutcomeTimedOut: false, lang.OutcomeNotRun: false, lang.OutcomeStoppedEarly: false, lang.OutcomeBaselineFailed: false, lang.OutcomeUnset: false,
 	} {
 		if cacheable(o) != want {
 			t.Errorf("cacheable(%v) = %v, want %v", o, !want, want)

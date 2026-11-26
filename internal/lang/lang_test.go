@@ -67,7 +67,7 @@ func TestFileFilter_NilIsTestFile(t *testing.T) {
 
 func TestMutantOutcomeNamesRoundTrip(t *testing.T) {
 	all := []MutantOutcome{OutcomeKilled, OutcomeSurvived, OutcomeTimedOut, OutcomeNotCovered,
-		OutcomeBuildFailed, OutcomeNotApplied, OutcomeNotRun, OutcomeStoppedEarly}
+		OutcomeBuildFailed, OutcomeNotApplied, OutcomeNotRun, OutcomeStoppedEarly, OutcomeBaselineFailed}
 	seen := map[string]bool{}
 	for _, o := range all {
 		name := o.String()
