@@ -265,8 +265,9 @@ Only mutants that compiled and were tested are scored. The summary lists everyth
 | not covered | survived | no test executes the mutated code (Go) |
 | does not compile | excluded | the mutation is not a valid program, so it says nothing about the tests |
 | not run | excluded | the budget ran out or the run was cancelled; a gating tier with any of these is at least WARN |
+| not tested | excluded | the tests that reach the mutant fail without any mutation; a gating tier with any of these is FAIL |
 
-If a package's tests fail before any mutation is applied, its mutants are reported as not run instead of all "killed".
+A test that fails before any mutation is applied cannot judge a mutant. It is retried once, then left out and named on stderr; the other tests still run. A mutant that only such tests reach is reported as not tested instead of "killed", and the run fails rather than passing over code it could not check.
 
 #### Keeping large diffs fast
 

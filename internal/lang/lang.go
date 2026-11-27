@@ -156,17 +156,21 @@ const (
 	// OutcomeStoppedEarly: skipped because the tier's verdict was already
 	// statistically settled. Excluded.
 	OutcomeStoppedEarly
+	// OutcomeBaselineFailed: the tests that would judge the mutant fail
+	// without any mutation, so it could not be tested. Excluded; fails the gate.
+	OutcomeBaselineFailed
 )
 
 var outcomeNames = map[MutantOutcome]string{
-	OutcomeKilled:       "killed",
-	OutcomeSurvived:     "survived",
-	OutcomeTimedOut:     "timed_out",
-	OutcomeNotCovered:   "not_covered",
-	OutcomeBuildFailed:  "build_failed",
-	OutcomeNotApplied:   "not_applied",
-	OutcomeNotRun:       "not_run",
-	OutcomeStoppedEarly: "stopped_early",
+	OutcomeKilled:         "killed",
+	OutcomeSurvived:       "survived",
+	OutcomeTimedOut:       "timed_out",
+	OutcomeNotCovered:     "not_covered",
+	OutcomeBuildFailed:    "build_failed",
+	OutcomeNotApplied:     "not_applied",
+	OutcomeNotRun:         "not_run",
+	OutcomeStoppedEarly:   "stopped_early",
+	OutcomeBaselineFailed: "baseline_failed",
 }
 
 // String returns the snake_case name used in reports and the result cache.

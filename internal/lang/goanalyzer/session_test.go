@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -272,19 +273,118 @@ func TestB(t *testing.T) {
 }
 
 // If the tests fail before any mutation, every mutant would look killed.
-// They must be reported as not run instead.
+// They must be reported as baseline-failed instead.
 func TestSession_FailingBaselineRunsNothing(t *testing.T) {
 	root := writeModule(t, "package p\n\nfunc Add(a, b int) int { return a + b }\n",
 		"package p\n\nimport \"testing\"\n\nfunc TestRed(t *testing.T) { t.Fatal(Add(1, 1)) }\n")
 	var log bytes.Buffer
 	got, _ := runSession(t, root, lang.SessionConfig{Log: &log})
 	for k, o := range got {
-		if o != lang.OutcomeNotRun {
-			t.Errorf("%s: got %v, want not_run", k, o)
+		if o != lang.OutcomeBaselineFailed {
+			t.Errorf("%s: got %v, want baseline_failed", k, o)
 		}
 	}
 	if !strings.Contains(log.String(), "tests fail without any mutation") {
 		t.Errorf("the failing baseline must be reported, log:\n%s", log.String())
+	}
+}
+
+// One test that fails without any mutation must not cost the package its
+// other tests: it is left out and named, and the mutants the passing tests
+// reach are tested, including one that needs a build of its own. A mutant
+// only failing runs reach is baseline-failed, wherever the evidence is: a
+// test's last run (Twice), the whole suite (Setup, reached only after
+// another test's setup) or a first attempt the retry did not repeat (Once).
+func TestSession_FailingTestIsLeftOut(t *testing.T) {
+	source := `package p
+
+func Add(a, b int) int { return a + b }
+
+func Join(a string) string { return a + "!" }
+
+func Twice(a int) int { return a * 2 }
+
+func Setup(a int) int { return a * 3 }
+
+func Once(a int) int { return a * 4 }
+
+func Unused(a int) int { return a - 1 }
+
+func Size() int {
+	var b [2 + 1]int
+	return len(b)
+}
+`
+	tests := `package p
+
+import (
+	"os"
+	"testing"
+)
+
+var ready bool
+
+func TestAdd(t *testing.T) {
+	ready = true
+	if Add(2, 3) != 5 || Join("a") != "a!" || Size() != 3 {
+		t.Fatal("Add")
+	}
+}
+
+func TestSecondTry(t *testing.T) {
+	if _, err := os.Stat("tried"); err != nil {
+		os.WriteFile("tried", nil, 0o644)
+		t.Fatal("first try")
+	}
+}
+
+func TestNeedsSetup(t *testing.T) {
+	if !ready {
+		t.Fatal("not ready")
+	}
+	Setup(1)
+}
+
+func TestFlaky(t *testing.T) {
+	if _, err := os.Stat("ran"); err != nil {
+		os.WriteFile("ran", nil, 0o644)
+		Once(1)
+	}
+	t.Fatal("flaky")
+}
+
+func TestRed(t *testing.T) {
+	Twice(2)
+	t.Fatal("always red")
+}
+`
+	root := writeModule(t, source, tests)
+	var log bytes.Buffer
+	got, session := runSession(t, root, lang.SessionConfig{Log: &log})
+	want := map[string]lang.MutantOutcome{
+		"func Add(a, b int) int { return a + b } | math_operator":         lang.OutcomeKilled,
+		"func Join(a string) string { return a + \"!\" } | math_operator": lang.OutcomeBuildFailed,
+		"func Twice(a int) int { return a * 2 } | math_operator":          lang.OutcomeBaselineFailed,
+		"func Setup(a int) int { return a * 3 } | math_operator":          lang.OutcomeBaselineFailed,
+		"func Once(a int) int { return a * 4 } | math_operator":           lang.OutcomeBaselineFailed,
+		"func Unused(a int) int { return a - 1 } | math_operator":         lang.OutcomeNotCovered,
+		// An array length cannot be switched at run time: built on its own.
+		"var b [2 + 1]int | math_operator": lang.OutcomeKilled,
+	}
+	for k, o := range want {
+		if got[k] != o {
+			t.Errorf("%s: got %v, want %v", k, got[k], o)
+		}
+	}
+	b := session.pkgs[0].bins[0]
+	if len(b.tests) != 2 || b.tests[0].name != "TestAdd" || b.tests[1].name != "TestSecondTry" || b.whole != nil {
+		t.Errorf("want TestAdd and TestSecondTry kept, got %+v", b)
+	}
+	if session.pkgs[0].embedded[slices.IndexFunc(session.sites, func(s lang.MutantSite) bool { return s.Line == 16 })] {
+		t.Error("the array-length mutant must take the overlay path")
+	}
+	if !strings.Contains(log.String(), "3 test(s) fail without any mutation and were left out: TestNeedsSetup, TestFlaky, TestRed") {
+		t.Errorf("the left-out tests must be named, log:\n%s", log.String())
 	}
 }
 
@@ -347,6 +447,52 @@ func TestSession_SubpackageTestsKillMutants(t *testing.T) {
 	}
 }
 
+// A dependent package whose tests all fail must not cost the mutated package
+// its own healthy tests. What only the broken package reaches is
+// baseline-failed.
+func TestSession_BrokenSubpackageKeepsOwnTests(t *testing.T) {
+	root := writeModule(t, "package p\n\nfunc Add(a, b int) int { return a + b }\n\nfunc Twice(a int) int { return a * 2 }\n",
+		"package p\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(2, 3) != 5 {\n\t\tt.Fatal()\n\t}\n}\n")
+	sub := filepath.Join(root, "p/sub")
+	os.MkdirAll(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, "sub_test.go"), []byte("package sub\n\nimport (\n\t\"testing\"\n\n\t\"example.com/sample/p\"\n)\n\nfunc TestRed(t *testing.T) {\n\tp.Twice(2)\n\tt.Fatal()\n}\n"), 0o644)
+	os.WriteFile(filepath.Join(sub, "sub.go"), []byte("package sub\n"), 0o644)
+
+	var log bytes.Buffer
+	got, session := runSession(t, root, lang.SessionConfig{Log: &log})
+	if got["func Add(a, b int) int { return a + b } | math_operator"] != lang.OutcomeKilled {
+		t.Errorf("Add: %v", got)
+	}
+	if got["func Twice(a int) int { return a * 2 } | math_operator"] != lang.OutcomeBaselineFailed {
+		t.Errorf("Twice: %v", got)
+	}
+	if n := len(session.pkgs[0].bins); n != 2 {
+		t.Errorf("kept %d test binaries, want both", n)
+	}
+	if strings.Contains(log.String(), "one build at a time") {
+		t.Errorf("the shared build must be kept, log:\n%s", log.String())
+	}
+}
+
+func TestUsable(t *testing.T) {
+	some := []tracedTest{{name: "T"}}
+	cases := []struct {
+		own              bool
+		passing, failing []tracedTest
+		want             bool
+	}{
+		{true, some, some, true},
+		{true, nil, some, false},
+		{false, nil, some, true},
+		{false, nil, nil, false},
+	}
+	for _, c := range cases {
+		if got := (&testBinary{own: c.own}).usable(c.passing, c.failing); got != c.want {
+			t.Errorf("own=%v passing=%d failing=%d: got %v, want %v", c.own, len(c.passing), len(c.failing), got, c.want)
+		}
+	}
+}
+
 func TestParseTestPackages(t *testing.T) {
 	out := strings.Join([]string{
 		"example.com/m/p|/src/p|fmt,os",
@@ -371,6 +517,16 @@ func TestDependsOn(t *testing.T) {
 	}
 	if dependsOn(deps, "a") || dependsOn("a/bc", "a/b") {
 		t.Error("a path prefix is not a dependency")
+	}
+}
+
+func TestSkipArgs(t *testing.T) {
+	if got := (&mutantPackage{}).skipArgs(); got != nil {
+		t.Errorf("nothing left out: got %v, want no flag", got)
+	}
+	got := (&mutantPackage{leftOut: []string{"TestA", "TestB/x"}}).skipArgs()
+	if want := []string{"-skip", "^(TestA|TestB/x)$"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
@@ -572,8 +728,8 @@ func TestSession_TestsThatDoNotCompileRunNothing(t *testing.T) {
 	var log bytes.Buffer
 	got, _ := runSession(t, root, lang.SessionConfig{Log: &log})
 	for k, o := range got {
-		if o != lang.OutcomeNotRun {
-			t.Errorf("%s: got %v, want not_run", k, o)
+		if o != lang.OutcomeBaselineFailed {
+			t.Errorf("%s: got %v, want baseline_failed", k, o)
 		}
 	}
 	if !strings.Contains(log.String(), "its instrumented tests do not build; testing its 2 mutants one build at a time") {

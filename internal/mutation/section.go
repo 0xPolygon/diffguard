@@ -86,6 +86,7 @@ func outcomeNotes(counts map[lang.MutantOutcome]int, cached int) string {
 		{counts[lang.OutcomeBuildFailed], "do not compile (excluded)"},
 		{counts[lang.OutcomeNotApplied], "not applied (excluded)"},
 		{counts[lang.OutcomeNotRun], "NOT RUN (budget or cancelled)"},
+		{counts[lang.OutcomeBaselineFailed], "NOT TESTED (their tests fail without any mutation)"},
 		{counts[lang.OutcomeStoppedEarly], "skipped (verdict settled early)"},
 		{cached, "from cache"},
 	}
@@ -105,6 +106,8 @@ func outcomeNotes(counts map[lang.MutantOutcome]int, cached int) string {
 //   - Tier 3 is informational only — its score is reported but does not
 //     contribute to severity, because log/metric mutations are untestable
 //     by design in most Go code.
+//   - A gating tier with mutants whose tests fail without any mutation →
+//     FAIL: the gate cannot vouch for code it could not test.
 //   - A gating tier with mutants that never ran → at least WARN: the gate
 //     did not see everything it was asked to judge.
 //
@@ -123,13 +126,16 @@ func tieredSeverity(tiers []TierStats, opts Options) report.Severity {
 }
 
 // tierSeverity returns the severity contribution of a single tier: FAIL for
-// Tier 1 below its threshold, WARN for Tier 2 below its threshold or for an
+// Tier 1 below its threshold or for mutants whose tests fail unmutated, WARN for Tier 2 below its threshold or for an
 // incomplete gating tier, PASS otherwise (including Tier 3, which is
 // report-only).
 func tierSeverity(ts TierStats, opts Options) report.Severity {
 	threshold, gated := gatingThreshold(ts.Tier, opts)
 	if !gated {
 		return report.SeverityPass
+	}
+	if ts.BaselineFailed > 0 {
+		return report.SeverityFail
 	}
 	if ts.Total > 0 && ts.Score < threshold {
 		if ts.Tier == TierLogic {
@@ -180,8 +186,29 @@ func survivedFindings(mutants []Mutant) []report.Finding {
 			Severity: report.SeverityFail,
 		})
 	}
+	findings = append(findings, baselineFindings(mutants)...)
 	slices.SortStableFunc(findings, func(a, b report.Finding) int {
 		return cmp.Or(strings.Compare(a.File, b.File), cmp.Compare(a.Line, b.Line))
 	})
+	return findings
+}
+
+// baselineFindings reports, once per file, the mutants that could not be
+// tested because their tests fail without any mutation.
+func baselineFindings(mutants []Mutant) []report.Finding {
+	perFile := map[string]int{}
+	for _, m := range mutants {
+		if m.outcome() == lang.OutcomeBaselineFailed {
+			perFile[m.File]++
+		}
+	}
+	var findings []report.Finding
+	for file, n := range perFile {
+		findings = append(findings, report.Finding{
+			File:     file,
+			Message:  fmt.Sprintf("NOT TESTED: %d mutant(s); the tests that reach them fail without any mutation", n),
+			Severity: report.SeverityFail,
+		})
+	}
 	return findings
 }

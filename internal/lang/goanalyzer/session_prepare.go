@@ -44,6 +44,9 @@ func (p *mutantPackage) prepare(ctx context.Context) {
 		return
 	}
 	p.embedded, p.bins = in.embedded, bins
+	for _, b := range bins {
+		p.leftOut = append(p.leftOut, b.leftOut...)
+	}
 }
 
 func (p *mutantPackage) fallback(ctx context.Context, why string) {
@@ -224,7 +227,7 @@ func (p *mutantPackage) buildTestBinary(ctx context.Context, overlay string, tp 
 	if _, err := os.Stat(path); err != nil {
 		return nil, false
 	}
-	return &testBinary{path: path, dir: tp.dir}, false
+	return &testBinary{path: path, dir: tp.dir, own: tp.own}, false
 }
 
 // testPackage is a package whose tests can observe the mutated package.
@@ -282,27 +285,36 @@ func dependsOn(deps, importPath string) bool {
 
 // baseline runs the binary's tests unmutated, recording which mutants each
 // reaches. It prefers one run per test, which lets a mutant be tested by
-// only the tests that reach it; if a test fails on its own (tests that
-// depend on each other), it falls back to a single run of the whole suite.
-// It reports false if the suite does not pass even then.
+// only the tests that reach it. If some tests fail on their own, a single
+// run of the whole suite is tried (tests that depend on each other); if
+// that fails too, the failing tests are left out and the rest are used.
+// It reports false if that leaves nothing to go on.
 func (b *testBinary) baseline(ctx context.Context, s *goSession) bool {
-	names, ok := b.listTests(ctx, s.cfg)
+	names, listed := b.listTests(ctx, s.cfg)
+	passing, failing := b.traceEach(ctx, s, names)
+	if listed && failing == nil {
+		b.tests = passing
+		return true
+	}
+	release := s.acquire()
+	whole, ok := b.trace(ctx, s.cfg, "")
+	release()
 	if ok {
-		if tests, ok := b.traceEach(ctx, s, names); ok {
-			b.tests = tests
-			return true
-		}
+		b.whole = &whole
+		return true
 	}
-	for range 2 {
-		release := s.acquire()
-		whole, ok := b.trace(ctx, s.cfg, "")
-		release()
-		if ok {
-			b.whole = &whole
-			return true
-		}
+	if ctx.Err() != nil || !b.usable(passing, failing) {
+		return false
 	}
-	return false
+	// The failed suite run counts too: a test that needs another's setup
+	// reaches code there that it never gets to on its own.
+	b.tests, b.broken = passing, whole.reach
+	for _, t := range failing {
+		b.leftOut = append(b.leftOut, t.name)
+		maps.Copy(b.broken, t.reach)
+	}
+	s.logf("%s: %d test(s) fail without any mutation and were left out: %s", b.dir, len(b.leftOut), strings.Join(b.leftOut, ", "))
+	return true
 }
 
 // testName matches the top-level tests a binary lists that -test.run can
@@ -327,35 +339,60 @@ func (b *testBinary) listTests(ctx context.Context, cfg lang.SessionConfig) ([]s
 	return names, true
 }
 
-// traceEach traces every test in its own process. It reports false, and
-// stops starting further traces, as soon as one of them fails.
-func (b *testBinary) traceEach(ctx context.Context, s *goSession, names []string) ([]tracedTest, bool) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+// usable reports whether a binary whose suite fails can still be used with
+// its failing tests left out. The mutated package's own binary needs a test
+// that passes. A dependent package's needs only tests to leave out: with
+// none passing it judges nothing, but it must not cost the mutated package
+// its own healthy tests.
+func (b *testBinary) usable(passing, failing []tracedTest) bool {
+	if b.own {
+		return passing != nil
+	}
+	return failing != nil
+}
+
+// traceEach traces every test in its own process, a second time if it
+// fails, and returns the tests that passed and those that did not.
+func (b *testBinary) traceEach(ctx context.Context, s *goSession, names []string) (passing, failing []tracedTest) {
 	tests := make([]tracedTest, len(names))
 	passed := make([]bool, len(names))
 	var wg sync.WaitGroup
 	for i, name := range names {
 		release := s.acquire()
-		if ctx.Err() != nil {
-			release()
-			break
-		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer release()
-			if tests[i], passed[i] = b.trace(ctx, s.cfg, name); !passed[i] {
-				cancel()
-			}
+			tests[i], passed[i] = b.traceTwice(ctx, s.cfg, name)
 		}()
 	}
 	wg.Wait()
-	return tests, !slices.Contains(passed, false)
+	for i, t := range tests {
+		if passed[i] {
+			passing = append(passing, t)
+		} else {
+			failing = append(failing, t)
+		}
+	}
+	return passing, failing
+}
+
+// traceTwice traces one test, and once more if it fails. A test that fails
+// both times keeps what both runs reached.
+func (b *testBinary) traceTwice(ctx context.Context, cfg lang.SessionConfig, name string) (tracedTest, bool) {
+	first, ok := b.trace(ctx, cfg, name)
+	if ok {
+		return first, true
+	}
+	second, ok := b.trace(ctx, cfg, name)
+	if !ok {
+		maps.Copy(second.reach, first.reach)
+	}
+	return second, ok
 }
 
 // trace runs one test (or, with an empty name, the whole suite) unmutated
-// and returns what it reached.
+// and returns what it reached, which is recorded even if the run fails.
 func (b *testBinary) trace(ctx context.Context, cfg lang.SessionConfig, name string) (tracedTest, bool) {
 	traceFile := b.path + "." + name + ".trace"
 	os.Remove(traceFile)
@@ -370,10 +407,7 @@ func (b *testBinary) trace(ctx context.Context, cfg lang.SessionConfig, name str
 		name:    b.path,
 		args:    append([]string{"-test.count=1"}, runFilter(names, cfg.TestPattern)...),
 	}.run(ctx)
-	if res.err != nil {
-		return tracedTest{}, false
-	}
-	return tracedTest{name: name, duration: res.duration, reach: readTrace(traceFile)}, true
+	return tracedTest{name: name, duration: res.duration, reach: readTrace(traceFile)}, res.err == nil
 }
 
 // readTrace returns the mutant ids recorded in a trace file. A missing file
