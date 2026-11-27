@@ -287,16 +287,20 @@ func dependsOn(deps, importPath string) bool {
 // that fails too, the failing tests are left out and the rest are used.
 // It reports false if no test passes.
 func (b *testBinary) baseline(ctx context.Context, s *goSession) bool {
-	names, _ := b.listTests(ctx, s.cfg)
+	names, listed := b.listTests(ctx, s.cfg)
 	passing, failing := b.traceEach(ctx, s, names)
-	if len(failing) == 0 && len(passing) > 0 {
+	if listed && failing == nil {
 		b.tests = passing
 		return true
 	}
-	if b.traceWhole(ctx, s, len(passing) == 0) {
+	release := s.acquire()
+	whole, ok := b.trace(ctx, s.cfg, "")
+	release()
+	if ok {
+		b.whole = &whole
 		return true
 	}
-	if len(passing) == 0 || ctx.Err() != nil {
+	if passing == nil || ctx.Err() != nil {
 		return false
 	}
 	b.tests, b.broken = passing, map[int]bool{}
@@ -307,25 +311,6 @@ func (b *testBinary) baseline(ctx context.Context, s *goSession) bool {
 	}
 	s.logf("%s: %d test(s) fail without any mutation and were left out: %s", b.dir, len(left), strings.Join(left, ", "))
 	return true
-}
-
-// traceWhole traces the whole suite in one run, once more if retry is set
-// and the first run fails. It reports whether a run passed.
-func (b *testBinary) traceWhole(ctx context.Context, s *goSession, retry bool) bool {
-	tries := 1
-	if retry {
-		tries = 2
-	}
-	for range tries {
-		release := s.acquire()
-		whole, ok := b.trace(ctx, s.cfg, "")
-		release()
-		if ok {
-			b.whole = &whole
-			return true
-		}
-	}
-	return false
 }
 
 // testName matches the top-level tests a binary lists that -test.run can
