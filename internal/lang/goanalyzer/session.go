@@ -254,6 +254,7 @@ func mutantTimeout(baseline, ceiling time.Duration) time.Duration {
 type testBinary struct {
 	path string
 	dir  string
+	own  bool // the mutated package's own tests
 	// tests holds one traced run per test when every test passes on its
 	// own; otherwise whole holds a single traced run of the full suite.
 	tests []tracedTest

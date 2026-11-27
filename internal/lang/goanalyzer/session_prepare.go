@@ -227,7 +227,7 @@ func (p *mutantPackage) buildTestBinary(ctx context.Context, overlay string, tp 
 	if _, err := os.Stat(path); err != nil {
 		return nil, false
 	}
-	return &testBinary{path: path, dir: tp.dir}, false
+	return &testBinary{path: path, dir: tp.dir, own: tp.own}, false
 }
 
 // testPackage is a package whose tests can observe the mutated package.
@@ -288,7 +288,7 @@ func dependsOn(deps, importPath string) bool {
 // only the tests that reach it. If some tests fail on their own, a single
 // run of the whole suite is tried (tests that depend on each other); if
 // that fails too, the failing tests are left out and the rest are used.
-// It reports false if no test passes.
+// It reports false if that leaves nothing to go on.
 func (b *testBinary) baseline(ctx context.Context, s *goSession) bool {
 	names, listed := b.listTests(ctx, s.cfg)
 	passing, failing := b.traceEach(ctx, s, names)
@@ -303,7 +303,7 @@ func (b *testBinary) baseline(ctx context.Context, s *goSession) bool {
 		b.whole = &whole
 		return true
 	}
-	if passing == nil || ctx.Err() != nil {
+	if ctx.Err() != nil || !b.usable(passing, failing) {
 		return false
 	}
 	// The failed suite run counts too: a test that needs another's setup
@@ -337,6 +337,18 @@ func (b *testBinary) listTests(ctx context.Context, cfg lang.SessionConfig) ([]s
 		}
 	}
 	return names, true
+}
+
+// usable reports whether a binary whose suite fails can still be used with
+// its failing tests left out. The mutated package's own binary needs a test
+// that passes. A dependent package's needs only tests to leave out: with
+// none passing it judges nothing, but it must not cost the mutated package
+// its own healthy tests.
+func (b *testBinary) usable(passing, failing []tracedTest) bool {
+	if b.own {
+		return passing != nil
+	}
+	return failing != nil
 }
 
 // traceEach traces every test in its own process, a second time if it

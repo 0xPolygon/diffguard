@@ -447,6 +447,52 @@ func TestSession_SubpackageTestsKillMutants(t *testing.T) {
 	}
 }
 
+// A dependent package whose tests all fail must not cost the mutated package
+// its own healthy tests. What only the broken package reaches is
+// baseline-failed.
+func TestSession_BrokenSubpackageKeepsOwnTests(t *testing.T) {
+	root := writeModule(t, "package p\n\nfunc Add(a, b int) int { return a + b }\n\nfunc Twice(a int) int { return a * 2 }\n",
+		"package p\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(2, 3) != 5 {\n\t\tt.Fatal()\n\t}\n}\n")
+	sub := filepath.Join(root, "p/sub")
+	os.MkdirAll(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, "sub_test.go"), []byte("package sub\n\nimport (\n\t\"testing\"\n\n\t\"example.com/sample/p\"\n)\n\nfunc TestRed(t *testing.T) {\n\tp.Twice(2)\n\tt.Fatal()\n}\n"), 0o644)
+	os.WriteFile(filepath.Join(sub, "sub.go"), []byte("package sub\n"), 0o644)
+
+	var log bytes.Buffer
+	got, session := runSession(t, root, lang.SessionConfig{Log: &log})
+	if got["func Add(a, b int) int { return a + b } | math_operator"] != lang.OutcomeKilled {
+		t.Errorf("Add: %v", got)
+	}
+	if got["func Twice(a int) int { return a * 2 } | math_operator"] != lang.OutcomeBaselineFailed {
+		t.Errorf("Twice: %v", got)
+	}
+	if n := len(session.pkgs[0].bins); n != 2 {
+		t.Errorf("kept %d test binaries, want both", n)
+	}
+	if strings.Contains(log.String(), "one build at a time") {
+		t.Errorf("the shared build must be kept, log:\n%s", log.String())
+	}
+}
+
+func TestUsable(t *testing.T) {
+	some := []tracedTest{{name: "T"}}
+	cases := []struct {
+		own              bool
+		passing, failing []tracedTest
+		want             bool
+	}{
+		{true, some, some, true},
+		{true, nil, some, false},
+		{false, nil, some, true},
+		{false, nil, nil, false},
+	}
+	for _, c := range cases {
+		if got := (&testBinary{own: c.own}).usable(c.passing, c.failing); got != c.want {
+			t.Errorf("own=%v passing=%d failing=%d: got %v, want %v", c.own, len(c.passing), len(c.failing), got, c.want)
+		}
+	}
+}
+
 func TestParseTestPackages(t *testing.T) {
 	out := strings.Join([]string{
 		"example.com/m/p|/src/p|fmt,os",
