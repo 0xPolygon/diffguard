@@ -44,6 +44,9 @@ func (p *mutantPackage) prepare(ctx context.Context) {
 		return
 	}
 	p.embedded, p.bins = in.embedded, bins
+	for _, b := range bins {
+		p.leftOut = append(p.leftOut, b.leftOut...)
+	}
 }
 
 func (p *mutantPackage) fallback(ctx context.Context, why string) {
@@ -303,13 +306,14 @@ func (b *testBinary) baseline(ctx context.Context, s *goSession) bool {
 	if passing == nil || ctx.Err() != nil {
 		return false
 	}
-	b.tests, b.broken = passing, map[int]bool{}
-	var left []string
+	// The failed suite run counts too: a test that needs another's setup
+	// reaches code there that it never gets to on its own.
+	b.tests, b.broken = passing, whole.reach
 	for _, t := range failing {
-		left = append(left, t.name)
+		b.leftOut = append(b.leftOut, t.name)
 		maps.Copy(b.broken, t.reach)
 	}
-	s.logf("%s: %d test(s) fail without any mutation and were left out: %s", b.dir, len(left), strings.Join(left, ", "))
+	s.logf("%s: %d test(s) fail without any mutation and were left out: %s", b.dir, len(b.leftOut), strings.Join(b.leftOut, ", "))
 	return true
 }
 
@@ -347,9 +351,7 @@ func (b *testBinary) traceEach(ctx context.Context, s *goSession, names []string
 		go func() {
 			defer wg.Done()
 			defer release()
-			if tests[i], passed[i] = b.trace(ctx, s.cfg, name); !passed[i] {
-				tests[i], passed[i] = b.trace(ctx, s.cfg, name)
-			}
+			tests[i], passed[i] = b.traceTwice(ctx, s.cfg, name)
 		}()
 	}
 	wg.Wait()
@@ -361,6 +363,20 @@ func (b *testBinary) traceEach(ctx context.Context, s *goSession, names []string
 		}
 	}
 	return passing, failing
+}
+
+// traceTwice traces one test, and once more if it fails. A test that fails
+// both times keeps what both runs reached.
+func (b *testBinary) traceTwice(ctx context.Context, cfg lang.SessionConfig, name string) (tracedTest, bool) {
+	first, ok := b.trace(ctx, cfg, name)
+	if ok {
+		return first, true
+	}
+	second, ok := b.trace(ctx, cfg, name)
+	if !ok {
+		maps.Copy(second.reach, first.reach)
+	}
+	return second, ok
 }
 
 // trace runs one test (or, with an empty name, the whole suite) unmutated

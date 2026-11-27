@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -289,31 +290,71 @@ func TestSession_FailingBaselineRunsNothing(t *testing.T) {
 }
 
 // One test that fails without any mutation must not cost the package its
-// other tests: it is left out and named, the mutants the passing tests reach
-// are tested, and a mutant only the failing test reaches is baseline-failed.
+// other tests: it is left out and named, and the mutants the passing tests
+// reach are tested, including one that needs a build of its own. A mutant
+// only failing runs reach is baseline-failed, wherever the evidence is: a
+// test's last run (Twice), the whole suite (Setup, reached only after
+// another test's setup) or a first attempt the retry did not repeat (Once).
 func TestSession_FailingTestIsLeftOut(t *testing.T) {
 	source := `package p
 
 func Add(a, b int) int { return a + b }
 
+func Join(a string) string { return a + "!" }
+
 func Twice(a int) int { return a * 2 }
 
+func Setup(a int) int { return a * 3 }
+
+func Once(a int) int { return a * 4 }
+
 func Unused(a int) int { return a - 1 }
+
+func Size() int {
+	var b [2 + 1]int
+	return len(b)
+}
 `
 	tests := `package p
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+var ready bool
 
 func TestAdd(t *testing.T) {
-	if Add(2, 3) != 5 {
+	ready = true
+	if Add(2, 3) != 5 || Join("a") != "a!" || Size() != 3 {
 		t.Fatal("Add")
 	}
 }
 
-func TestRed(t *testing.T) {
-	if Add(2, 3) != 5 || Twice(2) != 4 {
-		t.Fatal("unreachable")
+func TestSecondTry(t *testing.T) {
+	if _, err := os.Stat("tried"); err != nil {
+		os.WriteFile("tried", nil, 0o644)
+		t.Fatal("first try")
 	}
+}
+
+func TestNeedsSetup(t *testing.T) {
+	if !ready {
+		t.Fatal("not ready")
+	}
+	Setup(1)
+}
+
+func TestFlaky(t *testing.T) {
+	if _, err := os.Stat("ran"); err != nil {
+		os.WriteFile("ran", nil, 0o644)
+		Once(1)
+	}
+	t.Fatal("flaky")
+}
+
+func TestRed(t *testing.T) {
+	Twice(2)
 	t.Fatal("always red")
 }
 `
@@ -321,9 +362,14 @@ func TestRed(t *testing.T) {
 	var log bytes.Buffer
 	got, session := runSession(t, root, lang.SessionConfig{Log: &log})
 	want := map[string]lang.MutantOutcome{
-		"func Add(a, b int) int { return a + b } | math_operator": lang.OutcomeKilled,
-		"func Twice(a int) int { return a * 2 } | math_operator":  lang.OutcomeBaselineFailed,
-		"func Unused(a int) int { return a - 1 } | math_operator": lang.OutcomeNotCovered,
+		"func Add(a, b int) int { return a + b } | math_operator":         lang.OutcomeKilled,
+		"func Join(a string) string { return a + \"!\" } | math_operator": lang.OutcomeBuildFailed,
+		"func Twice(a int) int { return a * 2 } | math_operator":          lang.OutcomeBaselineFailed,
+		"func Setup(a int) int { return a * 3 } | math_operator":          lang.OutcomeBaselineFailed,
+		"func Once(a int) int { return a * 4 } | math_operator":           lang.OutcomeBaselineFailed,
+		"func Unused(a int) int { return a - 1 } | math_operator":         lang.OutcomeNotCovered,
+		// An array length cannot be switched at run time: built on its own.
+		"var b [2 + 1]int | math_operator": lang.OutcomeKilled,
 	}
 	for k, o := range want {
 		if got[k] != o {
@@ -331,11 +377,14 @@ func TestRed(t *testing.T) {
 		}
 	}
 	b := session.pkgs[0].bins[0]
-	if len(b.tests) != 1 || b.tests[0].name != "TestAdd" || b.whole != nil {
-		t.Errorf("want only TestAdd kept, got %+v", b)
+	if len(b.tests) != 2 || b.tests[0].name != "TestAdd" || b.tests[1].name != "TestSecondTry" || b.whole != nil {
+		t.Errorf("want TestAdd and TestSecondTry kept, got %+v", b)
 	}
-	if !strings.Contains(log.String(), "1 test(s) fail without any mutation and were left out: TestRed") {
-		t.Errorf("the left-out test must be named, log:\n%s", log.String())
+	if session.pkgs[0].embedded[slices.IndexFunc(session.sites, func(s lang.MutantSite) bool { return s.Line == 16 })] {
+		t.Error("the array-length mutant must take the overlay path")
+	}
+	if !strings.Contains(log.String(), "3 test(s) fail without any mutation and were left out: TestNeedsSetup, TestFlaky, TestRed") {
+		t.Errorf("the left-out tests must be named, log:\n%s", log.String())
 	}
 }
 
@@ -422,6 +471,16 @@ func TestDependsOn(t *testing.T) {
 	}
 	if dependsOn(deps, "a") || dependsOn("a/bc", "a/b") {
 		t.Error("a path prefix is not a dependency")
+	}
+}
+
+func TestSkipArgs(t *testing.T) {
+	if got := (&mutantPackage{}).skipArgs(); got != nil {
+		t.Errorf("nothing left out: got %v, want no flag", got)
+	}
+	got := (&mutantPackage{leftOut: []string{"TestA", "TestB/x"}}).skipArgs()
+	if want := []string{"-skip", "^(TestA|TestB/x)$"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

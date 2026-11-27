@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -119,6 +120,9 @@ type mutantPackage struct {
 	// build is unavailable, which routes every site to the overlay path.
 	embedded map[int]bool
 	bins     []*testBinary
+	// leftOut names the tests of bins that fail without any mutation. The
+	// overlay path skips them too.
+	leftOut []string
 
 	baselineOnce sync.Once
 	baselineOK   bool
@@ -177,6 +181,7 @@ func (p *mutantPackage) runOverlay(ctx context.Context, idx int) lang.MutantResu
 	// so that a hang is reported as a timeout, not as a failing test.
 	timeout := overlayTimeout(p.baselineTook, cfg.Timeout)
 	args := buildTestArgs(lang.TestRunConfig{Timeout: timeout + time.Minute, TestPattern: cfg.TestPattern}, overlay)
+	args = slices.Insert(args, len(args)-1, p.skipArgs()...)
 	return classify(ctx, p.goCmd(ctx, timeout, args...), lang.OutcomeKilled)
 }
 
@@ -188,12 +193,21 @@ func (p *mutantPackage) overlayBaseline(ctx context.Context) {
 	if pattern := p.session.cfg.TestPattern; pattern != "" {
 		args = append(args, "-run", pattern)
 	}
+	args = append(args, p.skipArgs()...)
 	res := p.goCmd(ctx, baselineTimeout(p.session.cfg), append(args, "./...")...)
 	p.baselineOK = res.err == nil
 	p.baselineTook = res.duration
 	if !p.baselineOK && ctx.Err() == nil {
 		p.session.logf("tests fail without any mutation in %s; its mutants cannot be tested\n%s", p.dir, res.output)
 	}
+}
+
+// skipArgs returns the go test flag that skips the left-out tests.
+func (p *mutantPackage) skipArgs() []string {
+	if p.leftOut == nil {
+		return nil
+	}
+	return []string{"-skip", exactly(p.leftOut)}
 }
 
 func (p *mutantPackage) goCmd(ctx context.Context, timeout time.Duration, args ...string) procResult {
@@ -247,6 +261,8 @@ type testBinary struct {
 	// broken holds the mutants reached by tests that fail without any
 	// mutation and are therefore left out of tests.
 	broken map[int]bool
+	// leftOut names those tests.
+	leftOut []string
 }
 
 // tracedTest is an unmutated test run and the mutants it reached.
@@ -323,9 +339,14 @@ func runFilter(names []string, pattern string) []string {
 		}
 		return []string{"-test.run", pattern}
 	}
+	return []string{"-test.run", exactly(names)}
+}
+
+// exactly returns the pattern matching the tests called names and no other.
+func exactly(names []string) string {
 	quoted := make([]string, len(names))
 	for i, n := range names {
 		quoted[i] = regexp.QuoteMeta(n)
 	}
-	return []string{"-test.run", "^(" + strings.Join(quoted, "|") + ")$"}
+	return "^(" + strings.Join(quoted, "|") + ")$"
 }
